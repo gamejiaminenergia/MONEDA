@@ -3,15 +3,15 @@ import { createPersistentStore } from './store';
 export interface ModelStat {
   decisions: number;
   latencySumMs: number;
-  maxRally: number;
-  fallbacks: number;
+  /** Mayor tiempo que un modelo mantuvo vivo a su jugador. */
+  survivalMs: number;
 }
 
 export type ModelStats = Record<string, ModelStat>;
 
-const STORAGE_KEY = 'nimble.modelStats.v1';
+const STORAGE_KEY = 'nimble.modelStats.v3';
 
-export const emptyStat = (): ModelStat => ({ decisions: 0, latencySumMs: 0, maxRally: 0, fallbacks: 0 });
+export const emptyStat = (): ModelStat => ({ decisions: 0, latencySumMs: 0, survivalMs: 0 });
 
 function parseModelStats(raw: string | null): ModelStats | null {
   if (!raw) return null;
@@ -23,8 +23,7 @@ function parseModelStats(raw: string | null): ModelStats | null {
       stats[model] = {
         decisions: Number(value?.decisions) || 0,
         latencySumMs: Number(value?.latencySumMs) || 0,
-        maxRally: Number(value?.maxRally) || 0,
-        fallbacks: Number(value?.fallbacks) || 0,
+        survivalMs: Number(value?.survivalMs) || 0,
       };
     }
     return stats;
@@ -42,7 +41,7 @@ export const modelStatsStore = createPersistentStore<ModelStats>({
 export function mergeRecord(
   stats: ModelStats,
   model: string,
-  patch: { decisions?: number; latencyMs?: number; maxRally?: number; fallbacks?: number },
+  patch: { decisions?: number; latencyMs?: number; survivalMs?: number },
 ): ModelStats {
   const current = stats[model] ?? emptyStat();
   return {
@@ -50,8 +49,7 @@ export function mergeRecord(
     [model]: {
       decisions: current.decisions + (patch.decisions ?? 0),
       latencySumMs: current.latencySumMs + (patch.latencyMs ?? 0),
-      maxRally: Math.max(current.maxRally, patch.maxRally ?? 0),
-      fallbacks: current.fallbacks + (patch.fallbacks ?? 0),
+      survivalMs: Math.max(current.survivalMs, patch.survivalMs ?? 0),
     },
   };
 }

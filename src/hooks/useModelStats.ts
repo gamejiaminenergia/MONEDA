@@ -17,15 +17,15 @@ export function useModelStats() {
     modelStatsStore.set((current) => mergeRecord(current, model, patch));
   }, []);
 
-  /** Solo escribe si el rally supera el record; asi no re-renderiza de mas. */
-  const recordMaxRally = useCallback((model: string, rally: number) => {
+  /** Solo escribe si la supervivencia supera el record; asi no re-renderiza de mas. */
+  const recordSurvival = useCallback((model: string, survivalMs: number) => {
     modelStatsStore.set((current) => {
       const stat = current[model] ?? emptyStat();
-      return rally > stat.maxRally ? mergeRecord(current, model, { maxRally: rally }) : current;
+      return survivalMs > stat.survivalMs ? mergeRecord(current, model, { survivalMs }) : current;
     });
   }, []);
 
   const reset = useCallback(() => modelStatsStore.set({}), []);
 
-  return { stats, record, recordMaxRally, reset };
+  return { stats, record, recordSurvival, reset };
 }

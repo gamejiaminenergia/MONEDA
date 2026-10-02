@@ -1,19 +1,32 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { DEFAULT_LIVES, PADDLE_MIN_POS, W } from '@/lib/game/constants';
+import {
+  BALL_MAX,
+  BALL_MIN,
+  BALL_SPEED,
+  BOUNCE_SKEW_MAX,
+  BOUNCE_SKEW_MIN,
+  DANGER_R,
+  KILL_R,
+  MAX_BALL_SPEED,
+  MIN_BALL_SPEED,
+  PLAY_MAX,
+  PLAY_MIN,
+} from '@/lib/game/constants';
 import { GameEngine } from '@/lib/game/engine';
-import type { GameEvent, SideDecision } from '@/lib/game/types';
+import { PLAYERS, PLAYER_SPAWN, type Player } from '@/lib/game/players';
+import type { GameEvent, Move, PlayerDecision } from '@/lib/game/types';
 
-const decision = (moves: [string, string]): SideDecision => ({
-  choice: moves.join('|'),
-  moves: moves as SideDecision['moves'],
-  probabilities: { [moves.join('|')]: 1 },
-  marginals: [
-    { subir: 0, bajar: 0, izquierda: 0, derecha: 0, quedarse: 0, ...{ [moves[0]]: 1 } },
-    { subir: 0, bajar: 0, izquierda: 0, derecha: 0, quedarse: 0, ...{ [moves[1]]: 1 } },
-  ] as SideDecision['marginals'],
+const VICTIM: Player = 'rojo';
+/** Esquina libre donde se aparcan los jugadores que no participan del caso. */
+const PARK = { x: 40, y: 680 };
+const CENTER = { x: 360, y: 360 };
+
+const decision = (move: Move): PlayerDecision => ({
+  choice: move,
+  move,
+  probabilities: { [move]: 1 },
   confidence: 1,
-  source: 'model',
 });
 
 function runUntil(
@@ -30,21 +43,30 @@ function runUntil(
   return collected;
 }
 
-describe('GameEngine (cuatro equipos)', () => {
+/** Deja solo a `keep` en juego; al resto lo manda a una esquina. */
+function parkOthers(engine: GameEngine, keep: Player): void {
+  for (const player of PLAYERS) {
+    if (player === keep || !engine.isAlive(player)) continue;
+    engine.moveRunnerTo(player, PARK);
+  }
+}
+
+describe('GameEngine (diez jugadores)', () => {
   let engine: GameEngine;
 
   beforeEach(() => {
-    engine = new GameEngine({ random: () => 0.25 });
-    engine.skipServeDelay();
+    engine = new GameEngine({ random: () => 0.25, servePauseMs: 0 });
   });
 
-  it('arranca con los cuatro equipos vivos y sus vidas completas', () => {
+  it('arranca con los diez jugadores vivos y fuera de la zona de la bola', () => {
     const ui = engine.ui();
-    expect(ui.aliveCount).toBe(4);
-    expect(ui.startingLives).toBe(DEFAULT_LIVES);
-    for (const side of ['left', 'right', 'top', 'bottom'] as const) {
-      expect(ui.sides[side].lives).toBe(DEFAULT_LIVES);
-      expect(ui.sides[side].alive).toBe(true);
+    expect(ui.aliveCount).toBe(PLAYERS.length);
+    expect(ui.ballSpeed).toBe(BALL_SPEED);
+    for (const player of PLAYERS) {
+      expect(ui.players[player].alive).toBe(true);
+      expect(ui.players[player].move).toBeNull();
+      const spawn = PLAYER_SPAWN[player];
+      expect(Math.hypot(spawn.x - CENTER.x, spawn.y - CENTER.y)).toBeGreaterThan(KILL_R);
     }
   });
 
@@ -55,95 +77,220 @@ describe('GameEngine (cuatro equipos)', () => {
     expect(engine.view().ball.x).toBe(before);
   });
 
-  it('el equipo que no cubre la bola pierde una vida', () => {
-    const events = runUntil(engine, (all) => all.some((event) => event.type === 'life-lost'));
-    const lost = events.find((event) => event.type === 'life-lost');
-
-    expect(lost?.type).toBe('life-lost');
-    if (lost?.type !== 'life-lost') throw new Error('sin evento de vida');
-    expect(lost.lives).toBe(DEFAULT_LIVES - 1);
-    expect(engine.ui().sides[lost.side].lives).toBe(DEFAULT_LIVES - 1);
-    expect(engine.ui().sides[lost.side].alive).toBe(true);
+  it('un jugador quieto no se sale de la mesa', () => {
+    for (const player of PLAYERS) {
+      engine.applyDecision(player, decision('arriba-izquierda'));
+      engine.step(16);
+    }
+    for (const player of PLAYERS) {
+      const runner = engine.view().runners[player];
+      expect(runner.x).toBeGreaterThanOrEqual(PLAY_MIN - 0.001);
+      expect(runner.y).toBeGreaterThanOrEqual(PLAY_MIN - 0.001);
+    }
   });
 
-  it('el equipo que pierde todas sus vidas muere y su pared queda sellada', () => {
-    engine.reset({ lives: 1 });
-    engine.skipServeDelay();
-    const events = runUntil(engine, (all) => all.some((event) => event.type === 'death'));
-    const death = events.find((event) => event.type === 'death');
+  it('la bola toca a un jugador y lo mata en el acto', () => {
+    parkOthers(engine, VICTIM);
+    engine.moveRunnerTo(VICTIM, CENTER);
+    engine.forceServe(0, 250);
 
-    expect(death?.type).toBe('death');
-    if (death?.type !== 'death') throw new Error('sin evento de muerte');
-    expect(engine.isAlive(death.side)).toBe(false);
-    expect(engine.ui().sides[death.side].lives).toBe(0);
-    expect(engine.aliveSides()).toHaveLength(3);
+    const events = runUntil(engine, (all) => all.some((event) => event.type === 'kill'));
+    const kill = events.find((event) => event.type === 'kill');
+
+    expect(kill?.type).toBe('kill');
+    if (kill?.type !== 'kill') throw new Error('sin evento de muerte');
+    expect(kill.player).toBe(VICTIM);
+    expect(engine.isAlive(VICTIM)).toBe(false);
+    expect(engine.ui().players[VICTIM].alive).toBe(false);
   });
 
-  it('la partida termina cuando queda un solo equipo vivo', () => {
-    engine.reset({ lives: 1 });
-    engine.skipServeDelay();
-    runUntil(engine, () => engine.finished);
+  it('una muerte no acelera la bola: la velocidad se mantiene toda la ronda', () => {
+    parkOthers(engine, VICTIM);
+    engine.moveRunnerTo(VICTIM, CENTER);
+    engine.forceServe(0, 250);
+    runUntil(engine, (all) => all.some((event) => event.type === 'kill'));
+
+    expect(engine.ui().kills).toBe(1);
+    expect(engine.ui().ballSpeed).toBe(250);
+    const ball = engine.view().ball;
+    expect(Math.hypot(ball.vx, ball.vy)).toBeCloseTo(250, 5);
+  });
+
+  it('un jugador muerto deja de moverse y de recibir decisiones', () => {
+    parkOthers(engine, VICTIM);
+    engine.moveRunnerTo(VICTIM, CENTER);
+    engine.forceServe(0, 250);
+    runUntil(engine, (all) => all.some((event) => event.type === 'kill'));
+
+    engine.applyDecision(VICTIM, decision('derecha'));
+    expect(engine.ui().players[VICTIM].move).toBeNull();
+    const before = { ...engine.view().runners[VICTIM] };
+    engine.step(16);
+    expect(engine.view().runners[VICTIM].x).toBe(before.x);
+  });
+
+  it('la partida termina cuando queda un solo jugador vivo', () => {
+    const survivors: Player[] = [];
+    while (!engine.finished && survivors.length < PLAYERS.length) {
+      const victim = PLAYERS.find((player) => engine.isAlive(player));
+      if (!victim) break;
+      parkOthers(engine, victim);
+      engine.moveRunnerTo(victim, CENTER);
+      const events = runUntil(engine, (all) => all.some((event) => event.type === 'kill'), 1200);
+      if (!events.some((event) => event.type === 'kill')) {
+        engine.forceServe(0, 250);
+        continue;
+      }
+      survivors.push(victim);
+    }
 
     expect(engine.finished).toBe(true);
-    expect(engine.aliveSides()).toHaveLength(1);
-    expect(engine.ui().winner).toBe(engine.aliveSides()[0]);
+    expect(engine.alivePlayers()).toHaveLength(1);
+    expect(engine.ui().winner).toBe(engine.alivePlayers()[0]);
     expect(engine.step(16)).toEqual([]);
   });
 
-  it('un equipo muerto no recibe decisiones', () => {
-    engine.reset({ lives: 1 });
-    engine.skipServeDelay();
-    runUntil(engine, (all) => all.some((event) => event.type === 'death'));
-    const dead = engine.aliveSides().length === 3 ? engine.ui() : null;
-    const deadSide = (['left', 'right', 'top', 'bottom'] as const).find((side) => !engine.isAlive(side));
-
-    expect(dead).not.toBeNull();
-    expect(deadSide).toBeDefined();
-    if (!deadSide) throw new Error('sin equipo muerto');
-
-    engine.applyDecision(deadSide, decision(['quedarse', 'quedarse']));
-    expect(engine.ui().sides[deadSide].choice).toBeNull();
-  });
-
-  it('cuenta el rally cuando un paddle intercepta la bola', () => {
-    const arrival = engine.snapshot().sides.right.arrival;
-    engine.movePaddle('right', 0, arrival);
-    engine.movePaddle('right', 1, PADDLE_MIN_POS);
-
-    const events = runUntil(engine, (all) => all.some((event) => event.type === 'paddle-hit'));
-    const hit = events.find((event) => event.type === 'paddle-hit');
-
-    expect(hit?.type).toBe('paddle-hit');
-    expect(hit?.side).toBe('right');
-    expect(engine.ui().rally).toBe(1);
-    expect(engine.ui().maxRally).toBe(1);
-  });
-
-  it('aplica la decision del modelo a los dos paddles', () => {
-    engine.applyDecision('top', decision(['izquierda', 'derecha']));
-    const before = engine.view().paddles.top.map((paddle) => paddle.pos);
+  it('aplica la decision del modelo como una sola direccion', () => {
+    const player: Player = 'rojo';
+    engine.applyDecision(player, decision('abajo-derecha'));
+    const before = { ...engine.view().runners[player] };
     engine.step(16);
-    const after = engine.view().paddles.top.map((paddle) => paddle.pos);
-    expect(after[0]).toBeLessThan(before[0] as number);
-    expect(after[1]).toBeGreaterThan(before[1] as number);
+    const after = engine.view().runners[player];
+    expect(after.x).toBeGreaterThan(before.x);
+    expect(after.y).toBeGreaterThan(before.y);
+    // La diagonal no es mas rapida que una recta.
+    const moved = Math.hypot(after.x - before.x, after.y - before.y);
+    expect(moved).toBeLessThanOrEqual(330 * 0.016 + 0.001);
   });
 
-  it('expone la llegada prevista de los cuatro equipos', () => {
+  it('la mesa no cambia: mismo marco y misma velocidad toda la ronda', () => {
+    // Sin muerte subita la ronda no tiene reloj de pared: las reglas son las
+    // mismas del primer saque al ultimo.
+    const calm = new GameEngine({ random: () => 0.25, servePauseMs: 0 });
+    calm.forceServe(0, BALL_SPEED);
+    for (let step = 0; step < 400; step++) calm.step(16);
+
+    expect(calm.ui().ballSpeed).toBe(BALL_SPEED);
+    expect(calm.snapshot().ballField).toEqual({ min: BALL_MIN, max: BALL_MAX });
+    expect(calm.snapshot().field).toEqual({ min: PLAY_MIN, max: PLAY_MAX });
+  });
+
+  it('la velocidad de la bola se puede subir y bajar en vivo', () => {
+    const speeding = new GameEngine({ random: () => 0.25, servePauseMs: 0 });
+    speeding.forceServe(0, BALL_SPEED);
+
+    speeding.setBallSpeed(320);
+    expect(speeding.ui().ballSpeed).toBe(320);
+    // Solo cambia el modulo: la direccion que traia la bola se respeta.
+    const current = speeding.view().ball;
+    expect(Math.hypot(current.vx, current.vy)).toBeCloseTo(320, 4);
+    expect(current.vx).toBeGreaterThan(0);
+    expect(current.vy).toBeCloseTo(0, 4);
+
+    // Queda como velocidad de los proximos saques.
+    speeding.reset();
+    expect(speeding.ui().ballSpeed).toBe(320);
+
+    // Y se recorta al rango del control.
+    speeding.setBallSpeed(10_000);
+    expect(speeding.ui().ballSpeed).toBe(MAX_BALL_SPEED);
+    speeding.setBallSpeed(-5);
+    expect(speeding.ui().ballSpeed).toBe(MIN_BALL_SPEED);
+  });
+
+  it('expone la amenaza de los diez jugadores', () => {
+    const target: Player = 'azul';
+    engine.moveRunnerTo(target, { x: 680, y: 360 });
+    engine.forceServe(0, 250);
     const snapshot = engine.snapshot();
-    for (const side of ['left', 'right', 'top', 'bottom'] as const) {
-      expect(snapshot.sides[side].arrival).toBeGreaterThanOrEqual(0);
-      expect(snapshot.sides[side].arrival).toBeLessThanOrEqual(W);
+
+    expect(snapshot.players[target].threatMs).toBeGreaterThan(0);
+    expect(snapshot.killRadius).toBe(KILL_R);
+    expect(snapshot.dangerRadius).toBe(DANGER_R);
+    expect(snapshot.field).toEqual({ min: PLAY_MIN, max: PLAY_MAX });
+    expect(Object.keys(snapshot.players)).toHaveLength(PLAYERS.length);
+  });
+
+  it('la bola tuerce en cada rebote: si no, la partida no acaba nunca', () => {
+    // Sin desvio, la bola recorreria siempre las mismas cuatro rectas de la
+    // mesa y habria zonas donde no puede aparecer nunca: los jugadores se
+    // refugiarian ahi y la partida no terminaria nunca.
+    let seed = 7;
+    const random = (): number => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return seed / 2147483648;
+    };
+
+    // Un rebote limpio por angulo: se sale en diagonal hacia arriba-derecha y
+    // se corta en el primer muro, que lejos de las esquinas es choque de frente.
+    // Un unico tiro largo acababa viajando casi en horizontal y dejaba muy
+    // pocas muestras utiles.
+    const angles = [30, 40, 45, 50, 60, 70].map((degrees) => (degrees * Math.PI) / 180);
+    const skews: number[] = [];
+    for (const angle of angles) {
+      const skewy = new GameEngine({ servePauseMs: 0, random });
+      for (const player of PLAYERS) skewy.moveRunnerTo(player, PARK);
+      skewy.forceServe(angle, 210);
+
+      for (let step = 0; step < 300; step++) {
+        const before = { ...skewy.view().ball };
+        const events = skewy.step(16).filter((event) => event.type === 'wall');
+        // Un unico rebote por paso: en una esquina tocan dos paredes y el
+        // desvio se aplica dos veces, que ya no es comparable con un giro.
+        if (events.length !== 1) continue;
+        // De frente a la pared: en un roce rasante los cuatro reflejos posibles
+        // se confunden y no se puede saber cuanto giro de verdad.
+        const beforeSpeed = Math.hypot(before.vx, before.vy);
+        if (Math.abs(before.vx) < beforeSpeed * 0.25 || Math.abs(before.vy) < beforeSpeed * 0.25) {
+          continue;
+        }
+        // El rebote elastico ya refleja el rumbo: en angulo, una pared vertical
+        // manda theta a pi-theta y una horizontal theta a -theta. El desvio es
+        // lo que sobra respecto de cualquiera de esos cuatro reflejos.
+        const angleBefore = Math.atan2(before.vy, before.vx);
+        const after = Math.atan2(skewy.view().ball.vy, skewy.view().ball.vx);
+        const delta = (target: number): number =>
+          Math.atan2(Math.sin(target - after), Math.cos(target - after));
+        skews.push(
+          Math.min(
+            ...[angleBefore, -angleBefore, Math.PI - angleBefore, Math.PI + angleBefore].map(
+              (mirror) => Math.abs(delta(mirror)),
+            ),
+          ),
+        );
+        break;
+      }
     }
-    expect(snapshot.startingLives).toBe(DEFAULT_LIVES);
-    expect(Object.keys(snapshot.sides)).toHaveLength(4);
+
+    expect(skews.length).toBeGreaterThan(3);
+    for (const skew of skews) {
+      expect(skew).toBeGreaterThan(BOUNCE_SKEW_MIN - 1e-6);
+      expect(skew).toBeLessThanOrEqual(BOUNCE_SKEW_MAX + 1e-6);
+    }
+  });
+
+  it('los rebotes no aceleran la bola: la velocidad se mantiene', () => {
+    for (const player of PLAYERS) {
+      engine.moveRunnerTo(player, PARK);
+    }
+    engine.forceServe(0, 210);
+    const start = engine.view().ball;
+    const startSpeed = Math.hypot(start.vx, start.vy);
+    let bounces = 0;
+    for (let step = 0; step < 1200 && bounces < 2; step++) {
+      if (engine.step(16).some((event) => event.type === 'wall')) bounces += 1;
+    }
+    const ball = engine.view().ball;
+    expect(bounces).toBe(2);
+    expect(Math.hypot(ball.vx, ball.vy)).toBeCloseTo(startSpeed, 5);
+    expect(engine.ui().ballSpeed).toBe(210);
   });
 
   it('la trayectoria no depende del tamano del frame (paso fijo)', () => {
     const simulate = (frameMs: number): { x: number; y: number } => {
-      const run = new GameEngine({ random: () => 0.25 });
-      run.skipServeDelay();
-      // 600 ms: la bola alcanza a volar pero nadie llega a perder una vida.
-      for (let elapsed = 0; elapsed < 600; elapsed += frameMs) run.step(frameMs);
+      const run = new GameEngine({ random: () => 0.25, servePauseMs: 0 });
+      // 400 ms: la bola vuela y rebota, pero todavia no toca a nadie.
+      for (let elapsed = 0; elapsed < 400; elapsed += frameMs) run.step(frameMs);
       const ball = run.view().ball;
       return { x: ball.x, y: ball.y };
     };

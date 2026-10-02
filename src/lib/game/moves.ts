@@ -1,42 +1,98 @@
-import type { Axis } from './sides';
+/** Las ocho direcciones de la mesa mas quedarse quieto. */
+export type Move =
+  | 'arriba'
+  | 'abajo'
+  | 'izquierda'
+  | 'derecha'
+  | 'arriba-izquierda'
+  | 'arriba-derecha'
+  | 'abajo-izquierda'
+  | 'abajo-derecha'
+  | 'quedarse';
 
-export type Move = 'subir' | 'bajar' | 'izquierda' | 'derecha' | 'quedarse';
+/** Las mismas ocho sin la opcion de quieto: es lo que puede hacer una bola. */
+export type Compass = Exclude<Move, 'quedarse'>;
+
+export const ALL_MOVES: readonly Move[] = [
+  'arriba-izquierda',
+  'arriba',
+  'arriba-derecha',
+  'derecha',
+  'abajo-derecha',
+  'abajo',
+  'abajo-izquierda',
+  'izquierda',
+  'quedarse',
+];
+
+export const ALL_COMPASS: readonly Compass[] = ALL_MOVES.filter(
+  (move): move is Compass => move !== 'quedarse',
+);
+
+/** Diagonales normalizadas: moverse en diagonal no es mas rapido que en recto. */
+const DIAGONAL = Math.SQRT1_2;
+
+export interface Vec2Like {
+  x: number;
+  y: number;
+}
 
 /**
- * Los paddles solo se mueven por su propio eje: los equipos de los lados
- * (izquierda/derecha) suben y bajan, los de arriba/abajo se corren de lado.
+ * Desplazamiento por paso de tiempo de cada jugada. El vector ya viene
+ * normalizado, asi que el motor solo multiplica por la velocidad.
  */
-export const MOVES_BY_AXIS: Record<Axis, readonly Move[]> = {
-  y: ['subir', 'bajar', 'quedarse'],
-  x: ['izquierda', 'derecha', 'quedarse'],
+export const MOVE_VEC: Record<Move, Vec2Like> = {
+  'arriba-izquierda': { x: -DIAGONAL, y: -DIAGONAL },
+  arriba: { x: 0, y: -1 },
+  'arriba-derecha': { x: DIAGONAL, y: -DIAGONAL },
+  derecha: { x: 1, y: 0 },
+  'abajo-derecha': { x: DIAGONAL, y: DIAGONAL },
+  abajo: { x: 0, y: 1 },
+  'abajo-izquierda': { x: -DIAGONAL, y: DIAGONAL },
+  izquierda: { x: -1, y: 0 },
+  quedarse: { x: 0, y: 0 },
 };
 
-export const ALL_MOVES: readonly Move[] = ['subir', 'bajar', 'izquierda', 'derecha', 'quedarse'];
+export const isMove = (value: unknown): value is Move =>
+  typeof value === 'string' && (ALL_MOVES as readonly string[]).includes(value);
 
-/** Direccion asociada a cada jugada dentro de su eje. */
-export const MOVE_DIR: Record<Move, -1 | 0 | 1> = {
-  subir: -1,
-  bajar: 1,
-  izquierda: -1,
-  derecha: 1,
-  quedarse: 0,
+/** Etiquetas cortas para la interfaz. */
+export const MOVE_LABEL: Record<Move, string> = {
+  'arriba-izquierda': 'arr-izq',
+  arriba: 'arriba',
+  'arriba-derecha': 'arr-der',
+  derecha: 'derecha',
+  'abajo-derecha': 'ab-der',
+  abajo: 'abajo',
+  'abajo-izquierda': 'ab-izq',
+  izquierda: 'izquierda',
+  quedarse: 'quieto',
 };
 
-export const movesFor = (axis: Axis): readonly Move[] => MOVES_BY_AXIS[axis];
-
-export function isMoveForAxis(value: unknown, axis: Axis): value is Move {
-  return typeof value === 'string' && (movesFor(axis) as readonly string[]).includes(value);
+/**
+ * Jugada que mas se acerca a apuntar en `(dx, dy)`. Se usa para decidir la
+ * huida mas simple posible: alejarse del punto por donde llega la bola.
+ */
+export function moveToward(dx: number, dy: number): Move {
+  const length = Math.hypot(dx, dy);
+  if (length < 1e-6) return 'quedarse';
+  const ux = dx / length;
+  const uy = dy / length;
+  let best: Move = 'quedarse';
+  let bestScore = 0;
+  for (const move of ALL_MOVES) {
+    const vector = MOVE_VEC[move];
+    const score = vector.x * ux + vector.y * uy;
+    if (score > bestScore) {
+      bestScore = score;
+      best = move;
+    }
+  }
+  return best;
 }
 
-/** Las 9 combinaciones "a|b" que puede elegir un equipo (2 paddles x 3 jugadas). */
-export const combosFor = (axis: Axis): string[] => {
-  const moves = movesFor(axis);
-  return moves.flatMap((a) => moves.map((b) => `${a}|${b}`));
+/** Nombre de la direccion en la que se mueve un vector, en las ocho nomenclature. */
+export const compassOf = (vx: number, vy: number): Compass => {
+  if (vx === 0 && vy === 0) return 'derecha';
+  return moveToward(vx, vy) as Compass;
 };
-
-export function splitCombo(combo: string, axis: Axis): [Move, Move] | null {
-  const parts = combo.split('|');
-  const [a, b] = parts;
-  if (parts.length !== 2 || !isMoveForAxis(a, axis) || !isMoveForAxis(b, axis)) return null;
-  return [a, b];
-}

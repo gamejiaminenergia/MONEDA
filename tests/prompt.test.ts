@@ -1,78 +1,127 @@
 import { describe, expect, it } from 'vitest';
 
-import { buildQuestions, buildStatePrompt, comboCriteria } from '@/lib/game/prompt';
-import type { GameSnapshot, SideSnapshot } from '@/lib/game/types';
+import { buildQuestions, buildStatePrompt, moveCriteria } from '@/lib/game/prompt';
+import { ALL_MOVES } from '@/lib/game/moves';
+import {
+  BALL_MAX,
+  BALL_MIN,
+  DANGER_R,
+  KILL_R,
+  PLAY_MAX,
+  PLAY_MIN,
+  RUNNER_SPEED,
+} from '@/lib/game/constants';
+import { PLAYERS, type Player } from '@/lib/game/players';
+import type { GameSnapshot, PlayerRecord, PlayerSnapshot } from '@/lib/game/types';
 
-const side = (arrival: number, a: number, b: number, lives: number, alive = true): SideSnapshot => ({
-  arrival,
-  paddles: [{ pos: a }, { pos: b }],
-  lives,
-  alive,
+const player = (over: Partial<PlayerSnapshot> = {}): PlayerSnapshot => ({
+  x: 150,
+  y: 200,
+  distance: 300,
+  threatMs: null,
+  threatX: null,
+  threatY: null,
+  alive: true,
+  ...over,
 });
 
-const snapshot: GameSnapshot = {
-  ball: { x: 360, y: 200, vx: 250, vy: -80, verticalDirection: 'sube', horizontalDirection: 'right' },
-  sides: {
-    left: side(120, 210, 350, 7),
-    right: side(430, 210, 350, 10),
-    top: side(500, 200, 400, 2),
-    bottom: side(300, 250, 320, 9),
+/** Reparto por defecto: los diez repartidos con vida. */
+const table = (
+  over: Partial<Record<Player, Partial<PlayerSnapshot>>> = {},
+): PlayerRecord<PlayerSnapshot> =>
+  Object.fromEntries(PLAYERS.map((key) => [key, player(over[key])])) as PlayerRecord<PlayerSnapshot>;
+
+const snapshot = (over: Partial<GameSnapshot> = {}): GameSnapshot => ({
+  ball: {
+    x: 360,
+    y: 200,
+    vx: 250,
+    vy: -80,
+    speed: 262,
+    direction: 'arriba-derecha',
   },
-  startingLives: 10,
-  rally: 3,
+  players: table({
+    rojo: { x: 120, y: 150, distance: 245 },
+    azul: { x: 640, y: 210, distance: 280, threatMs: 420, threatX: 660, threatY: 210 },
+    rosa: { x: 200, y: 90, distance: 190, threatMs: 0, threatX: 360, threatY: 200 },
+    amarillo: { x: 520, y: 570, distance: 400 },
+  }),
+  killRadius: KILL_R,
+  dangerRadius: DANGER_R,
+  field: { min: PLAY_MIN, max: PLAY_MAX },
+  ballField: { min: BALL_MIN, max: BALL_MAX },
+  runnerSpeed: RUNNER_SPEED,
+  clockMs: 4200,
   paused: false,
   winner: null,
-};
+  ...over,
+});
 
 describe('prompt', () => {
-  it('deja claro que a las N derrotas el equipo muere', () => {
-    const text = buildStatePrompt(snapshot);
-    expect(text).toContain('pierde 10 veces MUERE');
-    expect(text).toContain('su pared queda sellada');
-    expect(text).toContain('Gana el ultimo equipo que siga vivo');
+  it('deja claro que un roce mata y que no hay vidas', () => {
+    const text = buildStatePrompt(snapshot());
+    expect(text).toContain('Si la bola toca a un jugador, ese jugador MUERE en el acto');
+    expect(text).toContain('sin vidas ni segunda oportunidad');
+    expect(text).toContain('Gana el ultimo jugador que siga vivo');
+    expect(text).toContain('no se pierde nunca');
   });
 
-  it('le dice a cada equipo cuantas vidas le quedan', () => {
-    const text = buildStatePrompt(snapshot);
-    expect(text).toContain('izquierda 7/10');
-    expect(text).toContain('derecha 10/10');
-    expect(text).toContain('arriba 2/10 AL BORDE DE MORIR');
-    expect(text).toContain('abajo 9/10');
+  it('nombra a los diez jugadores por su color', () => {
+    const text = buildStatePrompt(snapshot());
+    for (const name of PLAYERS) expect(text).toContain(name);
   });
 
-  it('describe la bola y los cuatro equipos', () => {
-    const text = buildStatePrompt(snapshot);
-    expect(text).toContain('Bola sube hacia derecha');
-    expect(text).toContain('Izquierda llegada A arriba, B arriba (A sobre B)');
-    expect(text).toContain('Arriba llegada A abajo, B abajo (A sobre B)');
-    expect(text).toContain('Abajo llegada A abajo, B altura (A sobre B)');
+  it('le dice a cada jugador cuando le llega la bola y por donde', () => {
+    const text = buildStatePrompt(snapshot());
+    expect(text).toContain('Azul en (640, 210), la bola le pilla en 420 ms por (660, 210)');
+    expect(text).toContain('Rosa en (200, 90), LA BOLA LE ESTA ENCIMA');
+    expect(text).toContain('Amarillo en (520, 570), de este vuelo la bola no le pilla');
   });
 
-  it('marca a los equipos muertos y no los describe en juego', () => {
-    const withDead = {
-      ...snapshot,
-      sides: { ...snapshot.sides, top: side(0, 200, 400, 0, false) },
-    };
-    const text = buildStatePrompt(withDead);
-    expect(text).toContain('arriba MUERTO');
-    expect(text).toContain('Equipos muertos: arriba.');
-    expect(text).not.toContain('Arriba llegada');
+  it('advierte que el vuelo cambia en el proximo rebote', () => {
+    const text = buildStatePrompt(snapshot());
+    expect(text).toContain('CADA REBOTE LA DESVIA un poco');
+    expect(text).toContain('solo se puede planificar el vuelo que esta en marcha');
   });
 
-  it('ofrece las nueve combinaciones de cada eje', () => {
-    const vertical = comboCriteria('y');
-    const horizontal = comboCriteria('x');
-    expect(Object.keys(vertical)).toHaveLength(9);
-    expect(vertical['subir|bajar']).toBe('paddle A subir, paddle B bajar');
-    expect(horizontal['izquierda|derecha']).toBe('paddle A izquierda, paddle B derecha');
-    expect(horizontal['subir|subir']).toBeUndefined();
+  it('da las medidas de la mesa y los radios', () => {
+    const text = buildStatePrompt(snapshot());
+    expect(text).toContain(`La mesa va de ${PLAY_MIN} a ${PLAY_MAX}`);
+    expect(text).toContain(`mata a ${KILL_R} px`);
+    expect(text).toContain(`avisa a ${DANGER_R} px`);
   });
 
-  it('pregunta solo por los equipos vivos', () => {
-    const questions = buildQuestions(['left', 'top']);
-    expect(Object.keys(questions)).toEqual(['izquierda', 'arriba']);
-    expect(Object.keys(questions.izquierda?.criteria ?? {})).toHaveLength(9);
-    expect(questions.izquierda?.instructions).toContain('subir, bajar, quedarse');
-    expect(questions.arriba?.instructions).toContain('izquierda, derecha, quedarse');
+  it('describe la bola', () => {
+    const text = buildStatePrompt(snapshot());
+    expect(text).toContain('Bola en (360, 200) a 262 px/s, yendo hacia arriba-derecha');
+  });
+
+  it('marca a los muertos y no los describe en juego', () => {
+    const view = snapshot();
+    const text = buildStatePrompt({
+      ...view,
+      players: { ...view.players, rosa: player({ x: 200, y: 90, alive: false }) },
+    });
+    expect(text).toContain('Ya muertos: rosa.');
+    expect(text).not.toContain('Rosa en (200, 90)');
+  });
+
+  it('anuncia que no ha muerto nadie', () => {
+    expect(buildStatePrompt(snapshot())).toContain('Todavia no ha muerto nadie.');
+  });
+
+  it('ofrece las nueve direcciones, sin ejes ni equipos', () => {
+    const criteria = moveCriteria();
+    expect(Object.keys(criteria)).toHaveLength(9);
+    expect(criteria['arriba-izquierda']).toBe('hacia arriba-izquierda');
+    expect(criteria.quedarse).toBe('quedarse quieto');
+    for (const move of ALL_MOVES) expect(criteria[move]).toBeDefined();
+  });
+
+  it('pregunta solo por los jugadores vivos', () => {
+    const questions = buildQuestions(['rojo', 'rosa']);
+    expect(Object.keys(questions)).toEqual(['rojo', 'rosa']);
+    expect(Object.keys(questions.rojo?.criteria ?? {})).toHaveLength(9);
+    expect(questions.rojo?.instructions).toContain('una por decision');
   });
 });

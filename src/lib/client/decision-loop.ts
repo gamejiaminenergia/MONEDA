@@ -1,6 +1,6 @@
 import type { DecisionResponse } from '@/lib/ai/contracts';
 import type { GameEngine } from '@/lib/game/engine';
-import { SIDES } from '@/lib/game/sides';
+import { PLAYERS } from '@/lib/game/players';
 
 export interface DecisionLoopHandlers {
   onResult?: (result: DecisionResponse, roundTripMs: number) => void;
@@ -10,7 +10,7 @@ export interface DecisionLoopHandlers {
 
 export interface DecisionLoopOptions extends DecisionLoopHandlers {
   engine: GameEngine;
-  /** Debe devolver la decision, ya sea del modelo o del heuristico. */
+  /** Devuelve la decision ya normalizada del modelo. */
   request: (snapshot: ReturnType<GameEngine['snapshot']>, signal: AbortSignal) => Promise<DecisionResponse>;
   intervalMs: () => number;
 }
@@ -65,11 +65,11 @@ export class DecisionLoop {
         const result = await request(engine.snapshot(), signal);
         if (signal.aborted) break;
         const roundTripMs = performance.now() - startedAt;
-        for (const side of SIDES) {
-          const decision = result.sides[side];
-          if (decision) engine.applyDecision(side, decision);
+        for (const player of PLAYERS) {
+          const decision = result.players[player];
+          if (decision) engine.applyDecision(player, decision);
         }
-        engine.recordLatency(roundTripMs, result.strategy === 'model' ? 'model' : 'heuristic');
+        engine.recordLatency(roundTripMs);
         onResult?.(result, roundTripMs);
       } catch (error) {
         if (signal.aborted) break;

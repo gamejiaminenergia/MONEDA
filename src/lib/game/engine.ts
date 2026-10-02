@@ -1,92 +1,96 @@
 import {
+  BALL_R,
   BALL_SPEED,
-  CENTER,
-  DEFAULT_LIVES,
-  PADDLE_MAX_POS,
-  PADDLE_MIN_POS,
-  PADDLE_PARK_EPSILON,
-  PADDLE_SPEED,
+  BOUNCE_SKEW_MAX,
+  BOUNCE_SKEW_MIN,
+  DANGER_R,
+  KILL_R,
+  MAX_BALL_SPEED,
+  MIN_BALL_SPEED,
+  PAD,
+  RUNNER_R,
+  RUNNER_SPEED,
   SERVE_PAUSE_MS,
-  SPAWN_SPREAD,
   W,
 } from './constants';
-import { MOVE_DIR } from './moves';
-import { bounceOff, clamp } from './physics';
-import { SIDES, SIDE_AXIS, type Side } from './sides';
+import { MOVE_VEC, compassOf, type Move } from './moves';
+import { clampPlay, distance, predictThreat, segmentHitsCircle } from './physics';
+import { PLAYERS, PLAYER_SPAWN, type Player } from './players';
 import type {
   BallState,
-  DecisionSource,
   GameEvent,
   GameSnapshot,
-  Move,
-  PaddlePair,
-  SideDecision,
-  SideRecord,
-  SideUiState,
+  Point,
+  RunnerState,
+  PlayerDecision,
+  PlayerRecord,
+  PlayerSnapshot,
+  PlayerUiState,
   UiState,
 } from './types';
-import { PongWorld, type PaddleContact } from './world';
+import { ArenaWorld } from './world';
 
 export interface EngineOptions {
-  /** Vidas por equipo. Al perder la ultima, el equipo muere. */
-  lives?: number;
-  /** El paddle mas cercano a la llegada se detiene ahi en vez de pasarse. */
-  parkNearest?: boolean;
   servePauseMs?: number;
   ballSpeed?: number;
-  paddleSpeed?: number;
+  /** Desvio maximo del rumbo en cada rebote, en radianes. */
+  bounceSkew?: number;
+  runnerSpeed?: number;
   /** Inyectable para tests deterministas. */
   random?: () => number;
 }
 
 interface ResolvedOptions {
-  lives: number;
-  parkNearest: boolean;
   servePauseMs: number;
   ballSpeed: number;
-  paddleSpeed: number;
+  bounceSkew: number;
+  runnerSpeed: number;
   random: () => number;
 }
 
-const emptySides = <T>(value: (side: Side) => T): SideRecord<T> =>
-  Object.fromEntries(SIDES.map((side) => [side, value(side)] as const)) as SideRecord<T>;
+interface ThreatView {
+  ms: number | null;
+  point: Point | null;
+}
+
+const emptyPlayers = <T>(value: (player: Player) => T): PlayerRecord<T> =>
+  Object.fromEntries(PLAYERS.map((player) => [player, value(player)] as const)) as PlayerRecord<T>;
 
 /**
- * Reglas del juego de cuatro equipos. La fisica vive en `PongWorld`; aqui
- * estan las vidas, la muerte de un equipo, el saque y las decisiones.
+ * Reglas del juego: diez jugadores con nombre de color, una bola que rebota
+ * para siempre y un unico final — el ultimo jugador vivo. No hay vidas ni
+ * segundo intento: un roce basta.
+ *
+ * La fisica de la bola vive en `ArenaWorld`; aqui estan los jugadores, el roce
+ * mortal y el saque. La velocidad de la bola no cambia durante la ronda: si la
+ * ronda se eterniza, lo que cambia es la mesa, que se cierra.
  */
 export class GameEngine {
   private readonly options: ResolvedOptions;
-  /** Toda la fisica vive aqui: integracion, choques y prediccion. */
-  private world = new PongWorld();
+  private world = new ArenaWorld();
   private listeners = new Set<() => void>();
 
-  private ball: BallState = { x: W / 2, y: CENTER, vx: 0, vy: 0 };
-  private paddles: SideRecord<PaddlePair> = emptySides(() => [
-    { pos: CENTER - SPAWN_SPREAD, dir: 0 },
-    { pos: CENTER + SPAWN_SPREAD, dir: 0 },
-  ]);
-  private lastDecision: SideRecord<SideDecision | null> = emptySides(() => null);
+  private ball: BallState = { x: 360, y: 360, vx: 0, vy: 0 };
+  private ballSpeed: number;
+  private runners: PlayerRecord<RunnerState> = emptyPlayers(
+    (player) => ({ ...PLAYER_SPAWN[player], move: 'quedarse' }),
+  );
+  private alive: PlayerRecord<boolean> = emptyPlayers(() => true);
+  private lastDecision: PlayerRecord<PlayerDecision | null> = emptyPlayers(() => null);
 
-  private lives: SideRecord<number> = emptySides(() => DEFAULT_LIVES);
-  private alive: SideRecord<boolean> = emptySides(() => true);
-
-  private serveToward: Side = 'left';
+  private serveToward: Player = PLAYERS[0];
   private serveDelayMs = 0;
-  private lastScoredAt = -Infinity;
   private clockMs = 0;
 
-  private rally = 0;
-  private maxRally = 0;
-  private points = 0;
+  private bounces = 0;
+  private kills = 0;
   private decisions = 0;
   private latencySumMs = 0;
   private lastLatencyMs: number | null = null;
-  private lastSource: DecisionSource | null = null;
 
   private paused = false;
   private thinking = false;
-  private winner: Side | null = null;
+  private winner: Player | null = null;
 
   private version = 0;
   private cachedUi: UiState | null = null;
@@ -94,16 +98,14 @@ export class GameEngine {
 
   constructor(options: EngineOptions = {}) {
     this.options = {
-      lives: options.lives ?? DEFAULT_LIVES,
-      parkNearest: options.parkNearest ?? true,
       servePauseMs: options.servePauseMs ?? SERVE_PAUSE_MS,
       ballSpeed: options.ballSpeed ?? BALL_SPEED,
-      paddleSpeed: options.paddleSpeed ?? PADDLE_SPEED,
+      bounceSkew: options.bounceSkew ?? BOUNCE_SKEW_MAX,
+      runnerSpeed: options.runnerSpeed ?? RUNNER_SPEED,
       random: options.random ?? Math.random,
     };
-    this.lives = emptySides(() => this.options.lives);
-    this.pushPaddles();
-    this.serve(this.pickServeTarget());
+    this.ballSpeed = this.options.ballSpeed;
+    this.serve();
   }
 
   /* ------------------------------ suscripcion ----------------------------- */
@@ -120,10 +122,6 @@ export class GameEngine {
 
   /* --------------------------------- control ------------------------------ */
 
-  get startingLives(): number {
-    return this.options.lives;
-  }
-
   get isPaused(): boolean {
     return this.paused;
   }
@@ -132,12 +130,22 @@ export class GameEngine {
     return this.winner !== null;
   }
 
-  isAlive(side: Side): boolean {
-    return this.alive[side];
+  /** Limites del CENTRO de un jugador. El marco nunca se mueve. */
+  private get runnerBounds(): { min: number; max: number } {
+    return { min: PAD + RUNNER_R, max: W - PAD - RUNNER_R };
   }
 
-  aliveSides(): Side[] {
-    return SIDES.filter((side) => this.alive[side]);
+  /** Limites del CENTRO de la bola. */
+  private get ballBounds(): { min: number; max: number } {
+    return { min: PAD + BALL_R, max: W - PAD - BALL_R };
+  }
+
+  isAlive(player: Player): boolean {
+    return this.alive[player];
+  }
+
+  alivePlayers(): Player[] {
+    return PLAYERS.filter((player) => this.alive[player]);
   }
 
   setPaused(paused: boolean): void {
@@ -157,104 +165,85 @@ export class GameEngine {
     this.touch();
   }
 
-  reset(overrides: { lives?: number } = {}): void {
-    if (overrides.lives !== undefined) this.options.lives = overrides.lives;
+  /**
+   * Cambia la velocidad de la bola en vivo, en px/s.
+   *
+   * Reescala el vector que la bola lleva ahora mismo —para que el cambio se
+   * note en el acto, sin cambiar de direccion— y la deja como velocidad de los
+   * proximos saques. Sigue siendo determinista: es una orden del jugador, no
+   * azar, y los rebotes solo cambian el angulo.
+   */
+  setBallSpeed(px: number): void {
+    const speed = Math.max(MIN_BALL_SPEED, Math.min(MAX_BALL_SPEED, px));
+    if (speed === this.ballSpeed) return;
 
-    // Un mundo nuevo: los equipos muertos de la partida anterior dejaron
-    // paddles destruidos y paredes selladas.
-    this.world = new PongWorld();
+    this.options.ballSpeed = speed;
+    this.ballSpeed = speed;
 
-    this.lives = emptySides(() => this.options.lives);
-    this.alive = emptySides(() => true);
-    this.rally = 0;
-    this.maxRally = 0;
-    this.points = 0;
+    const current = Math.hypot(this.ball.vx, this.ball.vy);
+    if (current > 0) {
+      const scale = speed / current;
+      this.ball = { ...this.ball, vx: this.ball.vx * scale, vy: this.ball.vy * scale };
+      this.world.setBallVelocity(this.ball.vx, this.ball.vy);
+    }
+    this.touch();
+  }
+
+  reset(): void {
+    this.world = new ArenaWorld();
+    this.ballSpeed = this.options.ballSpeed;
+    this.alive = emptyPlayers(() => true);
+    this.bounces = 0;
+    this.kills = 0;
     this.decisions = 0;
     this.latencySumMs = 0;
     this.lastLatencyMs = null;
-    this.lastSource = null;
     this.winner = null;
     this.paused = false;
     this.thinking = false;
     this.clockMs = 0;
-    this.lastScoredAt = -Infinity;
-    this.lastDecision = emptySides(() => null);
-    this.paddles = emptySides(() => [
-      { pos: CENTER - SPAWN_SPREAD, dir: 0 },
-      { pos: CENTER + SPAWN_SPREAD, dir: 0 },
-    ]);
-
-    this.pushPaddles();
-    this.serve(this.pickServeTarget());
+    this.lastDecision = emptyPlayers(() => null);
+    this.runners = emptyPlayers((player) => ({ ...PLAYER_SPAWN[player], move: 'quedarse' as Move }));
+    this.serve();
     this.touch();
   }
 
   /* --------------------------------- saque -------------------------------- */
 
-  private pickServeTarget(): Side {
-    const candidates = this.aliveSides();
-    if (candidates.length === 0) return 'left';
-    const index = Math.min(
-      candidates.length - 1,
-      Math.floor(this.options.random() * candidates.length),
-    );
-    return candidates[index] ?? 'left';
-  }
-
-  /** Saca hacia el equipo indicado, con un desvio lateral aleatorio. */
-  private serve(toward: Side): void {
-    const speed = this.options.ballSpeed;
-    const lateral = (this.options.random() * 2 - 1) * speed * 0.45;
-    const velocity: Record<Side, { vx: number; vy: number }> = {
-      left: { vx: -speed, vy: lateral },
-      right: { vx: speed, vy: lateral },
-      top: { vx: lateral, vy: -speed },
-      bottom: { vx: lateral, vy: speed },
+  /** Saca desde el centro en una direccion aleatoria. */
+  private serve(): void {
+    const angle = this.options.random() * Math.PI * 2;
+    this.ball = {
+      x: 360,
+      y: 360,
+      vx: Math.cos(angle) * this.ballSpeed,
+      vy: Math.sin(angle) * this.ballSpeed,
     };
-    this.ball = { x: W / 2, y: CENTER, ...velocity[toward] };
     this.world.setBall(this.ball);
-    this.serveToward = toward;
+    this.serveToward = this.serveTowardFor(this.ball);
     this.serveDelayMs = this.options.servePauseMs;
   }
 
-  /** Copia la posicion de los paddles al mundo fisico. */
-  private pushPaddles(): void {
-    for (const side of SIDES) {
-      this.world.setPaddle(side, 0, this.paddles[side][0].pos);
-      this.world.setPaddle(side, 1, this.paddles[side][1].pos);
+  /**
+   * Jugador mas alineado con la direccion de salida. Solo da contexto al
+   * evento de saque; la fisica no depende de esto.
+   */
+  private serveTowardFor(ball: BallState): Player {
+    const speed = Math.hypot(ball.vx, ball.vy);
+    if (speed === 0) return PLAYERS[0];
+    const ux = ball.vx / speed;
+    const uy = ball.vy / speed;
+    let best: Player = PLAYERS[0];
+    let bestProjection = Number.NEGATIVE_INFINITY;
+    for (const player of PLAYERS) {
+      const spawn = PLAYER_SPAWN[player];
+      const projection = (spawn.x - 360) * ux + (spawn.y - 360) * uy;
+      if (projection > bestProjection) {
+        bestProjection = projection;
+        best = player;
+      }
     }
-  }
-
-  /** Un equipo perdio una vida; si era la ultima, muere y su pared se sella. */
-  private loseLife(side: Side, events: GameEvent[]): void {
-    if (this.clockMs - this.lastScoredAt < 400) return;
-    this.lastScoredAt = this.clockMs;
-    this.points += 1;
-    this.rally = 0;
-    this.lives[side] = Math.max(0, this.lives[side] - 1);
-    events.push({
-      type: 'life-lost',
-      side,
-      lives: this.lives[side],
-      lost: this.options.lives - this.lives[side],
-    });
-
-    if (this.lives[side] === 0) {
-      this.alive[side] = false;
-      this.lastDecision[side] = null;
-      this.paddles[side][0].dir = 0;
-      this.paddles[side][1].dir = 0;
-      this.world.killTeam(side);
-      events.push({ type: 'death', side });
-    }
-
-    const remaining = this.aliveSides();
-    if (remaining.length > 0) this.serve(this.pickServeTarget());
-
-    if (remaining.length <= 1) {
-      this.winner = remaining[0] ?? null;
-      if (this.winner) events.push({ type: 'game-over', winner: this.winner });
-    }
+    return best;
   }
 
   /* -------------------------------- avance -------------------------------- */
@@ -270,8 +259,8 @@ export class GameEngine {
     const dt = Math.min(dtMs, 50) / 1000;
     this.clockMs += dtMs;
 
-    for (const side of SIDES) {
-      if (this.alive[side]) this.moveSide(side, dt);
+    for (const player of PLAYERS) {
+      if (this.alive[player]) this.moveRunner(player, dt);
     }
 
     if (this.serveDelayMs > 0) {
@@ -283,122 +272,136 @@ export class GameEngine {
       return events;
     }
 
-    // La fisica corre con paso fijo y devuelve lo que choco en este tramo.
-    const { contacts, walls, miss } = this.world.step(dtMs);
+    const { walls, sweep } = this.world.step(dtMs);
     this.ball = this.world.ball();
 
     for (const wall of walls) {
+      this.bounces += 1;
+      this.skewBall();
       events.push({ type: 'wall', x: wall.x, y: wall.y });
     }
 
-    // Los dos paddles de un equipo pueden taparse entre si y Box2D reporta los
-    // dos choques: para el juego es un solo golpe, el del paddle mas cercano.
-    const hits = new Map<Side, PaddleContact>();
-    for (const contact of contacts) {
-      const previous = hits.get(contact.side);
-      if (!previous) {
-        hits.set(contact.side, contact);
-        continue;
+    if (sweep) {
+      for (const player of this.alivePlayers()) {
+        const runner = this.runners[player];
+        if (!segmentHitsCircle(sweep.from, sweep.to, runner, KILL_R)) continue;
+        this.kill(player, events);
+        if (this.winner) break;
       }
-      const distanceTo = (candidate: PaddleContact): number =>
-        Math.abs(this.paddles[candidate.side][candidate.index].pos - candidate.ballY);
-      if (distanceTo(contact) < distanceTo(previous)) hits.set(contact.side, contact);
     }
-
-    for (const contact of hits.values()) {
-      if (!this.alive[contact.side]) continue;
-      const paddle = this.paddles[contact.side][contact.index];
-      const target = { ...this.ball };
-      if (SIDE_AXIS[contact.side] === 'y') target.y = contact.ballY;
-      else target.x = contact.ballX;
-
-      const { vx, vy } = bounceOff(paddle.pos, target, contact.side);
-      this.world.setBallVelocity(vx, vy);
-      this.rally += 1;
-      this.maxRally = Math.max(this.maxRally, this.rally);
-      events.push({
-        type: 'paddle-hit',
-        side: contact.side,
-        x: contact.ballX,
-        y: contact.ballY,
-        rally: this.rally,
-      });
-    }
-
-    if (hits.size > 0) this.ball = this.world.ball();
-    if (miss) this.loseLife(miss, events);
 
     if (events.length > 0) this.touch();
     return events;
   }
 
   /**
-   * Mueve un equipo. El paddle mas cercano al punto de llegada se detiene ahi
-   * para no pasarse; su companero simplemente sigue su jugada.
+   * La bola tuerce un poco al rebotar. Sin este desvio la bola recorreria
+   * siempre las mismas cuatro rectas de la mesa y habria zonas donde no puede
+   * aparecer nunca: los corredores se refugiarian ahi y la partida no acabaria.
    */
-  private moveSide(side: Side, dt: number): void {
-    const pair = this.paddles[side];
-    const arrival = this.world.predictArrival(side);
-    const nearest: 0 | 1 = Math.abs(pair[1].pos - arrival) < Math.abs(pair[0].pos - arrival) ? 1 : 0;
+  private skewBall(): void {
+    const speed = Math.hypot(this.ball.vx, this.ball.vy);
+    if (speed === 0) return;
+    const skew = BOUNCE_SKEW_MIN + this.options.random() * (this.options.bounceSkew - BOUNCE_SKEW_MIN);
+    const angle = Math.atan2(this.ball.vy, this.ball.vx) + (this.options.random() < 0.5 ? -skew : skew);
+    this.ball = { ...this.ball, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed };
+    this.world.setBallVelocity(this.ball.vx, this.ball.vy);
+  }
 
-    for (const index of [0, 1] as const) {
-      const paddle = pair[index];
-      const parking =
-        this.options.parkNearest &&
-        index === nearest &&
-        Math.abs(paddle.pos - arrival) < PADDLE_PARK_EPSILON;
-      const dir = parking ? 0 : paddle.dir;
-      if (dir === 0) continue;
-      paddle.pos = clamp(paddle.pos + dir * this.options.paddleSpeed * dt, PADDLE_MIN_POS, PADDLE_MAX_POS);
-      this.world.setPaddle(side, index, paddle.pos);
+  private moveRunner(player: Player, dt: number): void {
+    const runner = this.runners[player];
+    const vector = MOVE_VEC[runner.move];
+    if (vector.x === 0 && vector.y === 0) return;
+    const step = this.options.runnerSpeed * dt;
+    const { min, max } = this.runnerBounds;
+    runner.x = clampPlay(runner.x + vector.x * step, min, max);
+    runner.y = clampPlay(runner.y + vector.y * step, min, max);
+  }
+
+  /** La bola toco a un corredor: muere sin segunda oportunidad. */
+  private kill(player: Player, events: GameEvent[]): void {
+    const runner = this.runners[player];
+    this.alive[player] = false;
+    this.lastDecision[player] = null;
+    this.kills += 1;
+    events.push({ type: 'kill', player, x: runner.x, y: runner.y });
+    events.push({ type: 'death', player });
+
+    // Una muerte no toca la velocidad ni la mesa: la bola es igual de rapida
+    // para todos los que quedan y el marco no se mueve nunca. Cada saque se
+    // juega con las mismas reglas y el que sobrevive lo hace por decision.
+    const remaining = this.alivePlayers();
+    if (remaining.length > 1) {
+      this.serve();
+    } else {
+      this.winner = remaining[0] ?? null;
+      if (this.winner) events.push({ type: 'game-over', winner: this.winner });
     }
   }
 
   /* ------------------------------- decisiones ----------------------------- */
 
-  applyDecision(side: Side, decision: SideDecision): void {
-    if (!this.alive[side]) return;
-    const pair = this.paddles[side];
-    pair[0].dir = MOVE_DIR[decision.moves[0]];
-    pair[1].dir = MOVE_DIR[decision.moves[1]];
-    this.lastDecision[side] = decision;
+  applyDecision(player: Player, decision: PlayerDecision): void {
+    if (!this.alive[player]) return;
+    this.runners[player].move = decision.move;
+    this.lastDecision[player] = decision;
     this.touch();
   }
 
   /** Registra la latencia de una respuesta para las estadisticas. */
-  recordLatency(latencyMs: number, source: DecisionSource): void {
+  recordLatency(latencyMs: number): void {
     this.decisions += 1;
     this.latencySumMs += latencyMs;
     this.lastLatencyMs = Math.round(latencyMs);
-    this.lastSource = source;
     this.touch();
   }
 
   /* ---------------------------------- vistas ------------------------------ */
 
-  snapshot(): GameSnapshot {
-    const sides = emptySides((side) => ({
-      arrival: Math.round(this.world.predictArrival(side)),
-      paddles: [
-        { pos: Math.round(this.paddles[side][0].pos) },
-        { pos: Math.round(this.paddles[side][1].pos) },
-      ] as [{ pos: number }, { pos: number }],
-      lives: this.lives[side],
-      alive: this.alive[side],
-    }));
+  /** Amenaza de cada corredor: cuando y donde le llega la bola. */
+  private threats(): PlayerRecord<ThreatView> {
+    const { min, max } = this.ballBounds;
+    return emptyPlayers((player) => {
+      const runner = this.runners[player];
+      const threat = predictThreat(this.ball, runner, DANGER_R, 3000, min, max);
+      return threat ? { ms: Math.round(threat.ms), point: threat.point } : { ms: null, point: null };
+    });
+  }
 
+  snapshot(): GameSnapshot {
+    const threats = this.threats();
+    const players = emptyPlayers<PlayerSnapshot>((player) => {
+      const runner = this.runners[player];
+      const threat = threats[player];
+      return {
+        x: Math.round(runner.x),
+        y: Math.round(runner.y),
+        distance: Math.round(distance(this.ball, runner)),
+        threatMs: threat.ms,
+        threatX: threat.point ? Math.round(threat.point.x) : null,
+        threatY: threat.point ? Math.round(threat.point.y) : null,
+        alive: this.alive[player],
+      };
+    });
+
+    const field = this.runnerBounds;
+    const ballField = this.ballBounds;
     return {
       ball: {
         x: Math.round(this.ball.x),
         y: Math.round(this.ball.y),
         vx: Math.round(this.ball.vx),
         vy: Math.round(this.ball.vy),
-        verticalDirection: this.ball.vy > 0 ? 'baja' : this.ball.vy < 0 ? 'sube' : 'recta',
-        horizontalDirection: this.ball.vx > 0 ? 'right' : 'left',
+        speed: Math.round(this.ballSpeed),
+        direction: compassOf(this.ball.vx, this.ball.vy),
       },
-      sides,
-      startingLives: this.options.lives,
-      rally: this.rally,
+      players,
+      killRadius: KILL_R,
+      dangerRadius: DANGER_R,
+      field,
+      ballField,
+      runnerSpeed: this.options.runnerSpeed,
+      clockMs: Math.round(this.clockMs),
       paused: this.paused,
       winner: this.winner,
     };
@@ -407,17 +410,19 @@ export class GameEngine {
   /** Vista liviana para el renderer. */
   view(): {
     ball: BallState;
-    paddles: SideRecord<PaddlePair>;
-    alive: SideRecord<boolean>;
+    runners: PlayerRecord<RunnerState>;
+    alive: PlayerRecord<boolean>;
     serveDelayMs: number;
-    winner: Side | null;
+    pad: number;
+    winner: Player | null;
     paused: boolean;
   } {
     return {
       ball: this.ball,
-      paddles: this.paddles,
+      runners: this.runners,
       alive: this.alive,
       serveDelayMs: this.serveDelayMs,
+      pad: PAD,
       winner: this.winner,
       paused: this.paused,
     };
@@ -426,46 +431,35 @@ export class GameEngine {
   ui(): UiState {
     if (this.cachedUi && this.cachedUiVersion === this.version) return this.cachedUi;
 
-    const sideUi = (side: Side): SideUiState => {
-      const decision = this.lastDecision[side];
-      const moves: [Move, Move] = decision?.moves ?? ['quedarse', 'quedarse'];
+    const threats = this.threats();
+    const players = emptyPlayers<PlayerUiState>((player) => {
+      const decision = this.lastDecision[player];
+      const runner = this.runners[player];
       return {
-        paddles: [
-          {
-            pos: this.paddles[side][0].pos,
-            move: decision ? moves[0] : null,
-            probability: decision?.marginals[0][moves[0]] ?? 0,
-          },
-          {
-            pos: this.paddles[side][1].pos,
-            move: decision ? moves[1] : null,
-            probability: decision?.marginals[1][moves[1]] ?? 0,
-          },
-        ],
-        choice: decision?.choice ?? null,
+        x: runner.x,
+        y: runner.y,
+        move: decision?.move ?? null,
+        probability: decision ? (decision.probabilities[decision.move] ?? decision.confidence) : 0,
         confidence: decision?.confidence ?? 0,
-        source: decision?.source ?? null,
-        lives: this.lives[side],
-        lost: this.options.lives - this.lives[side],
-        alive: this.alive[side],
+        threatMs: this.alive[player] ? threats[player].ms : null,
+        alive: this.alive[player],
       };
-    };
+    });
 
     this.cachedUi = {
       version: this.version,
-      sides: emptySides(sideUi),
-      startingLives: this.options.lives,
+      players,
       winner: this.winner,
       paused: this.paused,
       thinking: this.thinking,
-      rally: this.rally,
-      maxRally: this.maxRally,
-      points: this.points,
-      aliveCount: this.aliveSides().length,
+      aliveCount: this.alivePlayers().length,
       decisions: this.decisions,
       avgLatencyMs: this.decisions ? Math.round(this.latencySumMs / this.decisions) : null,
       lastLatencyMs: this.lastLatencyMs,
-      lastSource: this.lastSource,
+      bounces: this.bounces,
+      kills: this.kills,
+      clockMs: Math.round(this.clockMs),
+      ballSpeed: Math.round(this.ballSpeed),
     };
     this.cachedUiVersion = this.version;
     return this.cachedUi;
@@ -473,16 +467,26 @@ export class GameEngine {
 
   /* ------------------------------- utilidades ----------------------------- */
 
-  /** Desplaza un paddle a mano. Util para el modo manual y los tests. */
-  movePaddle(side: Side, index: 0 | 1, pos: number): void {
-    this.paddles[side][index].pos = clamp(pos, PADDLE_MIN_POS, PADDLE_MAX_POS);
-    this.world.setPaddle(side, index, this.paddles[side][index].pos);
+  /** Desplaza un corredor a mano. Util para tests. */
+  moveRunnerTo(player: Player, point: Point): void {
+    const runner = this.runners[player];
+    runner.x = clampPlay(point.x);
+    runner.y = clampPlay(point.y);
     this.touch();
   }
 
   /** Fuerza un saque. Util en tests. */
-  forceServe(toward: Side): void {
-    this.serve(toward);
+  forceServe(angle: number, speed = this.ballSpeed): void {
+    this.ballSpeed = speed;
+    this.ball = {
+      x: 360,
+      y: 360,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+    };
+    this.world.setBall(this.ball);
+    this.serveToward = this.serveTowardFor(this.ball);
+    this.serveDelayMs = 0;
     this.touch();
   }
 

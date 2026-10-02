@@ -1,18 +1,19 @@
 {
   "name": "nimble-pong",
   "version": "0.2.0",
-  "description": "Pong de cuatro equipos donde cada jugada la decide un modelo local servido por Ollama. 10 vidas por equipo y el que pierde la ultima muere.",
+  "description": "Have No Mouth, and I Must Scream IA: pong de diez jugadores con nombre de color donde cada jugada la decide la API System One de TypeSafe. Un roce y el jugador muere; gana el ultimo que siga vivo.",
   "private": true,
   "license": "MIT",
   "type": "module",
   "keywords": [
     "nextjs",
     "typescript",
-    "ollama",
+    "typesafe",
     "llm",
     "pong",
     "planck",
     "box2d",
+    "phaser",
     "canvas"
   ],
   "engines": {
@@ -30,6 +31,7 @@
   },
   "dependencies": {
     "next": "16.3.8",
+    "phaser": "^4.2.1",
     "planck": "^1.5.0",
     "react": "19.3.0",
     "react-dom": "19.3.0",

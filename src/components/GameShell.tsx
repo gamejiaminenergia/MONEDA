@@ -2,29 +2,36 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-import { ControlBar, type ModelOption } from '@/components/ControlBar';
-import { DebugPanel } from '@/components/DebugPanel';
-import { ModelBoard } from '@/components/ModelBoard';
+import { GameControls, type ModelOption, type ProviderStatus } from '@/components/GameControls';
+import { LiveStats } from '@/components/LiveStats';
+import { ModelConsole } from '@/components/ModelConsole';
+import { ModelPanel } from '@/components/ModelPanel';
+import { PlayerRail } from '@/components/PlayerRail';
 import { Stage } from '@/components/Stage';
-import { Standings, type Status } from '@/components/Standings';
-import { StatsBar } from '@/components/StatsBar';
-import { TeamCard } from '@/components/TeamCard';
+import { TopBar } from '@/components/TopBar';
 import { useEngineUi } from '@/hooks/useEngineUi';
 import { useGameSettings } from '@/hooks/useGameSettings';
 import { useModelStats } from '@/hooks/useModelStats';
+import { useTheme } from '@/hooks/useTheme';
+import { useTrace } from '@/hooks/useTrace';
 import type { DecisionResponse } from '@/lib/ai/contracts';
-import { SoundBoard } from '@/lib/client/audio';
+import { createBoard, type BoardHandle } from '@/lib/client/board/board';
 import { DecisionLoop } from '@/lib/client/decision-loop';
-import { BoardRenderer } from '@/lib/client/renderer';
-import { HEURISTIC_MODEL, defaultSettings } from '@/lib/client/settings';
+import { defaultSettings } from '@/lib/client/settings';
+import type { Status } from '@/lib/client/ui';
+import { AUTO_RESTART_MS } from '@/lib/game/constants';
 import { GameEngine } from '@/lib/game/engine';
-import { buildStatePrompt } from '@/lib/game/prompt';
-import { SIDES, type Side } from '@/lib/game/sides';
-import type { GameEvent, GameSnapshot } from '@/lib/game/types';
+import { PLAYERS, type Player } from '@/lib/game/players';
+import type { GameEvent, GameSnapshot, PlayerRecord } from '@/lib/game/types';
+
+/** Cuantas peticiones pide la consola cuando esta abierta. */
+const CONSOLE_RECORDS = 30;
 
 interface ModelsPayload {
   reachable: boolean;
+  configured: boolean;
   url: string;
+  defaultModel: string;
   models: ModelOption[];
   error: string | null;
 }
@@ -49,60 +56,94 @@ async function requestDecision(signal: AbortSignal, body: unknown): Promise<Deci
   return (await response.json()) as DecisionResponse;
 }
 
+const emptyWins = (): PlayerRecord<number> =>
+  Object.fromEntries(PLAYERS.map((player) => [player, 0])) as PlayerRecord<number>;
+
 export function GameShell() {
-  const [engine] = useState(() => new GameEngine({ lives: defaultSettings.lives }));
+  const [engine] = useState(() => new GameEngine());
   const ui = useEngineUi(engine);
   const { settings, update } = useGameSettings();
-  const { stats: modelStats, record, recordMaxRally, reset: resetStats } = useModelStats();
-  const { model: modelId, lives } = settings;
+  const { theme, toggle: toggleTheme } = useTheme();
+  const { stats: modelStats, record, recordSurvival, reset: resetStats } = useModelStats();
+  const { model: modelId } = settings;
 
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const [sound] = useState(() => new SoundBoard(defaultSettings.muted));
-  const activeModelRef = useRef<string>(HEURISTIC_MODEL);
-  const lastSnapshotRef = useRef<GameSnapshot | null>(null);
+  const boardRef = useRef<HTMLDivElement | null>(null);
+  const boardHandleRef = useRef<BoardHandle | null>(null);
+  const activeModelRef = useRef<string>(defaultSettings.model);
+  /** Modelos del catalogo ya cargado: evita mandar un nombre que no existe. */
+  const modelsRef = useRef<Set<string>>(new Set());
+  const themeRef = useRef(theme);
   const settingsRef = useRef(settings);
 
   const [status, setStatus] = useState<Status>({ text: 'conectando…', kind: 'loading' });
   const [models, setModels] = useState<ModelOption[]>([]);
-  const [ollama, setOllama] = useState({ url: '—', reachable: false });
-  const [debug, setDebug] = useState({ snapshot: '', response: '' });
+  const [provider, setProvider] = useState<ProviderStatus>({
+    url: '—',
+    reachable: false,
+    configured: false,
+    error: null,
+  });
+  const [wins, setWins] = useState<PlayerRecord<number>>(emptyWins);
+  const [round, setRound] = useState(1);
+  const [countdownSec, setCountdownSec] = useState<number | null>(null);
 
   /* ------------------------------ preferencias ---------------------------- */
-
-  useEffect(() => {
-    sound.setMuted(settings.muted);
-  }, [sound, settings.muted]);
 
   useEffect(() => {
     settingsRef.current = settings;
   }, [settings]);
 
+  /** El silencio viaja a la escena sin recrearla. */
   useEffect(() => {
-    const unlock = () => sound.unlock();
-    document.addEventListener('pointerdown', unlock, { once: true });
-    return () => document.removeEventListener('pointerdown', unlock);
-  }, [sound]);
+    boardHandleRef.current?.setMuted(settings.muted);
+  }, [settings.muted]);
 
-  /* --------------------------- estado de Ollama --------------------------- */
+  /** La velocidad de la bola se ajusta en vivo desde el panel. */
+  useEffect(() => {
+    engine.setBallSpeed(settings.ballSpeed);
+  }, [engine, settings.ballSpeed]);
 
-  const applyModels = useCallback((payload: ModelsPayload) => {
-    setModels(payload.models);
-    setOllama({ url: payload.url, reachable: payload.reachable });
-    setStatus((current) =>
-      current.kind === 'err'
-        ? {
-            text: payload.reachable ? 'conectado' : (payload.error ?? 'sin conexión'),
-            kind: payload.reachable ? 'on' : 'err',
-          }
-        : current,
-    );
-  }, []);
+  /** El tema viaja al lienzo de Phaser sin recrear la escena. */
+  useEffect(() => {
+    themeRef.current = theme;
+    boardHandleRef.current?.setTheme(theme);
+  }, [theme]);
+
+  /* --------------------------- estado de TypeSafe ------------------------- */
+
+  const applyModels = useCallback(
+    (payload: ModelsPayload) => {
+      setModels(payload.models);
+      modelsRef.current = new Set(payload.models.map((model) => model.name));
+      setProvider({
+        url: payload.url,
+        reachable: payload.reachable,
+        configured: payload.configured,
+        error: payload.error,
+      });
+      // Si el modelo guardado ya no existe (p.ej. se retiro), se pasa al
+      // modelo por defecto del proveedor.
+      const currentModel = settingsRef.current.model;
+      if (payload.models.length > 0 && !payload.models.some((model) => model.name === currentModel)) {
+        update({ model: payload.defaultModel });
+      }
+      setStatus((current) =>
+        current.kind === 'err'
+          ? {
+              text: payload.reachable ? 'conectado' : (payload.error ?? 'sin conexión'),
+              kind: payload.reachable ? 'on' : 'err',
+            }
+          : current,
+      );
+    },
+    [update],
+  );
 
   const refreshModels = useCallback(async () => {
     try {
       applyModels(await fetchModels());
     } catch {
-      setOllama((current) => ({ ...current, reachable: false }));
+      setProvider((current) => ({ ...current, reachable: false }));
       setStatus({ text: 'sin conexión con el servidor', kind: 'err' });
     }
   }, [applyModels]);
@@ -125,64 +166,88 @@ export function GameShell() {
     };
   }, [applyModels]);
 
+  /* ------------------------- consola del modelo --------------------------- */
+
+  // El HUD solo necesita el resumen (barato); la consola pide las peticiones.
+  const hudTrace = useTrace({ limit: 0, intervalMs: 3000 });
+  const consoleTrace = useTrace({
+    limit: CONSOLE_RECORDS,
+    live: true,
+    enabled: settings.showConsole,
+  });
+
   /* --------------------------- bucle de simulacion ------------------------ */
 
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+    const parent = boardRef.current;
+    if (!parent) return;
 
-    const renderer = new BoardRenderer(canvas);
+    let cancelled = false;
+    let handle: BoardHandle | null = null;
 
-    const playEvent = (event: GameEvent): void => {
-      switch (event.type) {
-        case 'paddle-hit':
-          sound.beep(520 + SIDES.indexOf(event.side) * 60, 0.05, 'square', 0.04);
-          break;
-        case 'wall':
-          sound.beep(300, 0.03, 'square', 0.02);
-          break;
-        case 'life-lost':
-          sound.beep(200, 0.16, 'sawtooth', 0.05);
-          break;
-        case 'death':
-          sound.beep(140, 0.5, 'sawtooth', 0.07);
-          window.setTimeout(() => sound.beep(70, 0.7, 'sawtooth', 0.07), 160);
-          break;
-        case 'game-over':
-          sound.beep(660, 0.12, 'sine', 0.06);
-          window.setTimeout(() => sound.beep(880, 0.18, 'sine', 0.06), 130);
-          break;
-        default:
-          break;
-      }
-    };
-
-    let frame = 0;
-    let last = performance.now();
-
-    const tick = (now: number): void => {
-      const dt = Math.min(now - last, 50);
-      last = now;
-
-      const events = engine.step(dt);
-      for (const event of events) {
-        renderer.pushEvent(event, now);
-        playEvent(event);
-        if (event.type === 'paddle-hit') {
-          recordMaxRally(activeModelRef.current, event.rally);
+    // La escena de Phaser corre su propio bucle: avanza el motor, dibuja y
+    // sintetiza el audio. Aqui solo se atiende el final de ronda.
+    void createBoard({
+      parent,
+      engine,
+      muted: settingsRef.current.muted,
+      theme: themeRef.current,
+      onEvent: (event: GameEvent) => {
+        if (event.type !== 'game-over') return;
+        recordSurvival(activeModelRef.current, event.winner === null ? 0 : engine.ui().clockMs);
+        if (event.winner) {
+          const champion: Player = event.winner;
+          setWins((current) => ({ ...current, [champion]: current[champion] + 1 }));
         }
+      },
+    }).then((created) => {
+      // StrictMode monta dos veces en desarrollo: si este efecto ya se limpio,
+      // el juego se destruye en el acto y no quedan dos canvas.
+      if (cancelled) {
+        created.destroy();
+        return;
       }
+      handle = created;
+      created.setMuted(settingsRef.current.muted);
+      created.setTheme(themeRef.current);
+      boardHandleRef.current = created;
+    });
 
-      renderer.draw(engine.view(), now);
-      frame = requestAnimationFrame(tick);
-    };
-
-    frame = requestAnimationFrame(tick);
     return () => {
-      cancelAnimationFrame(frame);
-      renderer.destroy();
+      cancelled = true;
+      handle?.destroy();
+      boardHandleRef.current = null;
     };
-  }, [engine, recordMaxRally, sound]);
+  }, [engine, recordSurvival]);
+
+  /* ---------------------------- bucle infinito ---------------------------- */
+
+  /**
+   * Al morir el penultimo jugador se canta al ganador y, tras unos segundos,
+   * la ronda siguiente arranca sola. Nadie tiene que pulsar nada: la partida
+   * es un bucle mientras la pestana siga abierta.
+   */
+  useEffect(() => {
+    if (!ui.winner) return;
+
+    const deadline = performance.now() + AUTO_RESTART_MS;
+
+    const countdown = window.setInterval(() => {
+      setCountdownSec(Math.max(0, Math.ceil((deadline - performance.now()) / 1000)));
+    }, 200);
+
+    const restartTimer = window.setTimeout(() => {
+      engine.reset();
+      setCountdownSec(null);
+      setRound((current) => current + 1);
+      setStatus({ text: `ronda nueva · ${PLAYERS.length} jugadores vivos`, kind: 'on' });
+    }, AUTO_RESTART_MS);
+
+    return () => {
+      window.clearInterval(countdown);
+      window.clearTimeout(restartTimer);
+    };
+  }, [engine, ui.winner]);
 
   /* --------------------------- bucle de decisiones ------------------------ */
 
@@ -192,13 +257,11 @@ export function GameShell() {
    */
   const decide = useCallback(
     (snapshot: GameSnapshot, signal: AbortSignal): Promise<DecisionResponse> => {
-      const { model, strategy: currentStrategy } = settingsRef.current;
-      lastSnapshotRef.current = snapshot;
-      return requestDecision(signal, {
-        snapshot,
-        model: model === HEURISTIC_MODEL ? HEURISTIC_MODEL : model,
-        strategy: currentStrategy,
-      });
+      const { model, trace } = settingsRef.current;
+      // Mientras el catalogo no ha llegado no mandamos un modelo inventado:
+      // el servidor usa el suyo por defecto.
+      const requestedModel = modelsRef.current.has(model) ? model : undefined;
+      return requestDecision(signal, { snapshot, model: requestedModel, trace });
     },
     [],
   );
@@ -208,24 +271,10 @@ export function GameShell() {
       engine,
       intervalMs: () => settingsRef.current.intervalMs,
       request: decide,
-      onResult: (result, roundTripMs) => {
+      onResult: (result) => {
         activeModelRef.current = result.model;
-        record(result.model, {
-          decisions: 1,
-          latencyMs: result.latencyMs,
-          fallbacks: result.fallbackReason ? 1 : 0,
-        });
-        setStatus(
-          result.strategy === 'model'
-            ? { text: `conectado · ${result.model} · ${result.latencyMs} ms`, kind: 'on' }
-            : result.fallbackReason
-              ? { text: `respaldo local · ${result.fallbackReason}`, kind: 'pause' }
-              : { text: `heurístico local · ${Math.round(roundTripMs)} ms`, kind: 'on' },
-        );
-        setDebug({
-          snapshot: lastSnapshotRef.current ? buildStatePrompt(lastSnapshotRef.current) : '',
-          response: JSON.stringify(result, null, 2),
-        });
+        record(result.model, { decisions: 1, latencyMs: result.latencyMs });
+        setStatus({ text: `conectado · ${result.model} · ${result.latencyMs} ms`, kind: 'on' });
       },
       onError: (message) => setStatus({ text: message, kind: 'err' }),
       onIdle: () => {
@@ -241,13 +290,11 @@ export function GameShell() {
   /* ------------------------------- acciones ------------------------------- */
 
   const restart = useCallback(() => {
-    engine.reset({ lives: settingsRef.current.lives });
-    setStatus({ text: 'partida nueva · 4 equipos vivos', kind: 'on' });
+    engine.reset();
+    setCountdownSec(null);
+    setRound((current) => current + 1);
+    setStatus({ text: `ronda nueva · ${PLAYERS.length} jugadores vivos`, kind: 'on' });
   }, [engine]);
-
-  useEffect(() => {
-    if (engine.startingLives !== lives) engine.reset({ lives });
-  }, [engine, lives]);
 
   const togglePause = useCallback(() => {
     engine.togglePause();
@@ -255,20 +302,14 @@ export function GameShell() {
     setStatus(paused ? { text: 'en pausa', kind: 'pause' } : { text: 'conectado', kind: 'on' });
   }, [engine]);
 
-  const clearStats = resetStats;
+  const clearScore = useCallback(() => {
+    setWins(emptyWins());
+    setRound(1);
+  }, []);
 
-  const setDebugOpen = useCallback(
-    (open: boolean) => {
-      update({ showDebug: open });
-      if (open) {
-        setDebug((current) => ({
-          snapshot: current.snapshot || (lastSnapshotRef.current ? buildStatePrompt(lastSnapshotRef.current) : ''),
-          response: current.response,
-        }));
-      }
-    },
-    [update],
-  );
+  const toggleConsole = useCallback(() => {
+    update({ showConsole: !settingsRef.current.showConsole });
+  }, [update]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
@@ -280,77 +321,91 @@ export function GameShell() {
         togglePause();
       } else if (key === 'r') restart();
       else if (key === 'm') update({ muted: !settings.muted });
-      else if (key === 'd') setDebugOpen(!settings.showDebug);
+      else if (key === 'c') toggleConsole();
+      else if (key === 'escape' && settings.showConsole) update({ showConsole: false });
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [restart, setDebugOpen, togglePause, update, settings.muted, settings.showDebug]);
+  }, [restart, togglePause, toggleConsole, update, settings.muted, settings.showConsole]);
 
   const aliveCount = ui.aliveCount;
-  const activeModel = ui.lastSource === 'model' ? modelId : HEURISTIC_MODEL;
 
   return (
-    <div id="app">
-      <div className="layout">
+    <div id="app" className="app" data-console={settings.showConsole}>
+      <TopBar
+        round={round}
+        aliveCount={aliveCount}
+        status={status}
+        model={modelId}
+        inputTokens={hudTrace.summary?.inputTokens ?? null}
+        costUsd={hudTrace.summary?.costUsd ?? null}
+        costPerHourUsd={hudTrace.summary?.costPerHourUsd ?? null}
+        avgLatencyMs={ui.avgLatencyMs}
+        consoleOpen={settings.showConsole}
+        onToggleConsole={toggleConsole}
+      />
+
+      <main className="arena">
+        <PlayerRail players={ui.players} wins={wins} />
+
         <section className="board-col">
-          <h1>
-            NIMBLE <span>PONG</span>
-            <small>· 4 EQUIPOS · MUERE A LAS {ui.startingLives}</small>
-          </h1>
-          <Standings sides={ui.sides} startingLives={ui.startingLives} status={status} />
           <Stage
-            canvasRef={canvasRef}
+            boardRef={boardRef}
             thinking={ui.thinking}
             paused={ui.paused}
             winner={ui.winner}
+            wins={wins}
+            round={round}
+            countdownSec={countdownSec ?? Math.ceil(AUTO_RESTART_MS / 1000)}
             decisions={ui.decisions}
             avgLatencyMs={ui.avgLatencyMs}
+            clockMs={ui.clockMs}
+            statusKind={status.kind}
             onRestart={restart}
           />
           <p className="hint">
-            <kbd>espacio</kbd> pausa · <kbd>R</kbd> reiniciar · <kbd>M</kbd> sonido · <kbd>D</kbd> debug
+            <kbd>espacio</kbd> pausa · <kbd>R</kbd> reiniciar · <kbd>M</kbd> sonido · <kbd>C</kbd> consola
           </p>
         </section>
 
-        <aside className="hud-col">
-          <div id="cards">
-            {SIDES.map((side: Side) => (
-              <TeamCard key={side} side={side} state={ui.sides[side]} />
-            ))}
-          </div>
-
-          <StatsBar
+        <aside className="side-col">
+          <LiveStats
             decisions={ui.decisions}
             avgLatencyMs={ui.avgLatencyMs}
-            rally={ui.rally}
-            maxRally={ui.maxRally}
-            points={ui.points}
+            bounces={ui.bounces}
+            kills={ui.kills}
             aliveCount={aliveCount}
+            ballSpeed={ui.ballSpeed}
+            clockMs={ui.clockMs}
           />
-
-          <ModelBoard stats={modelStats} activeModel={activeModel} />
-
-          <ControlBar
-            settings={settings}
-            onChange={update}
-            models={models}
-            ollamaUrl={ollama.url}
-            ollamaReachable={ollama.reachable}
-            paused={ui.paused}
-            onTogglePause={togglePause}
-            onRestart={restart}
-            onClearStats={clearStats}
-            onRefreshModels={() => void refreshModels()}
-          />
-
-          <DebugPanel
-            open={settings.showDebug}
-            onToggle={setDebugOpen}
-            snapshot={debug.snapshot}
-            response={debug.response}
-          />
+          <ModelPanel stats={modelStats} activeModel={modelId} />
         </aside>
-      </div>
+      </main>
+
+      <GameControls
+        settings={settings}
+        onChange={update}
+        models={models}
+        provider={provider}
+        theme={theme}
+        paused={ui.paused}
+        onTogglePause={togglePause}
+        onRestart={restart}
+        onClearStats={resetStats}
+        onClearScore={clearScore}
+        onRefreshModels={() => void refreshModels()}
+        onToggleTheme={toggleTheme}
+      />
+
+      <ModelConsole
+        open={settings.showConsole}
+        onClose={() => update({ showConsole: false })}
+        records={consoleTrace.records}
+        summary={consoleTrace.summary ?? hudTrace.summary}
+        error={consoleTrace.error}
+        live
+        onClear={() => void consoleTrace.clear()}
+      />
     </div>
   );
 }

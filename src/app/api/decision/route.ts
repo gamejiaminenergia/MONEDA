@@ -2,127 +2,194 @@ import { NextResponse } from 'next/server';
 
 import type { DecisionResponse, ErrorResponse } from '@/lib/ai/contracts';
 import { decisionRequestSchema } from '@/lib/ai/contracts';
-import { heuristicDecision } from '@/lib/ai/heuristic';
 import { normalizeDecision } from '@/lib/ai/normalize';
 import { buildQuestions, buildStatePrompt } from '@/lib/game/prompt';
-import { SIDES, SIDE_NAME, type Side } from '@/lib/game/sides';
+import { PLAYERS, PLAYER_NAME, type Player } from '@/lib/game/players';
 import type { DecisionBundle } from '@/lib/game/types';
-import { askSystemOne, OllamaError, ollamaConfig } from '@/server/ollama';
+import { elapsedMs, logger, logsPrompts } from '@/server/log';
+import { ModelError } from '@/server/model-error';
+import { pushTrace } from '@/server/trace';
+import { askSystemOne, typesafeConfig, type SystemOneRequest } from '@/server/typesafe';
+
+const log = logger.child('api/decision');
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
-
-const HEURISTIC = 'heuristic';
-
-type Strategy = 'auto' | 'model' | 'heuristic';
-
-function strategyFromEnv(): Strategy {
-  const value = process.env.DECISION_STRATEGY;
-  return value === 'model' || value === 'heuristic' ? value : 'auto';
-}
 
 function fail(error: string, code: ErrorResponse['code'], status: number) {
   return NextResponse.json<ErrorResponse>({ error, code }, { status });
 }
 
-const aliveSides = (snapshot: { sides: Record<Side, { alive: boolean }> }): Side[] =>
-  SIDES.filter((side) => snapshot.sides[side].alive);
+const alivePlayers = (snapshot: { players: Record<Player, { alive: boolean }> }): Player[] =>
+  PLAYERS.filter((player) => snapshot.players[player].alive);
 
 /**
  * POST /api/decision
  *
- * Recibe el estado del juego (datos) y devuelve la jugada de cada equipo vivo.
- * Todo el trabajo con el LLM ocurre aqui: el navegador nunca habla con Ollama,
- * asi que no hay problemas de CORS ni de exponer la URL del servidor.
+ * Recibe el estado del juego (datos) y devuelve la jugada de cada jugador vivo.
+ * Todo el trabajo con el modelo ocurre aqui: el navegador nunca habla con
+ * TypeSafe ni ve la API key.
  *
- * El prompt incluye siempre las vidas de los cuatro equipos y la regla de
- * muerte, para que ningun modelo juegue sin saber que a las N derrotas muere.
+ * El prompt incluye siempre la amenaza que ve cada jugador y la regla de
+ * muerte, para que el modelo no juegue sin saber que un roce lo elimina.
  */
 export async function POST(request: Request) {
   let body: unknown;
   try {
     body = await request.json();
   } catch {
+    log.warn('cuerpo de la peticion invalido', { reason: 'no es JSON' });
     return fail('El cuerpo de la peticion no es JSON valido', 'bad-request', 400);
   }
 
   const parsed = decisionRequestSchema.safeParse(body);
   if (!parsed.success) {
+    log.warn('snapshot fuera de contrato', { issues: parsed.error.issues.length });
     return fail('El estado del juego no tiene el formato esperado', 'bad-request', 400);
   }
 
   const { snapshot } = parsed.data;
-  const config = ollamaConfig();
-  const strategy: Strategy = parsed.data.strategy ?? strategyFromEnv();
+  const config = typesafeConfig();
   const requestedModel = parsed.data.model?.trim();
   const model = requestedModel && requestedModel !== 'auto' ? requestedModel : config.model;
+  const traced = parsed.data.trace !== false;
   const startedAt = Date.now();
 
-  const heuristic = (fallbackReason: string | null): DecisionResponse => ({
-    model: HEURISTIC,
-    strategy: 'heuristic',
-    latencyMs: Date.now() - startedAt,
-    sides: heuristicDecision(snapshot),
-    usage: { inputTokens: null, outputTokens: null },
-    fallbackReason,
-  });
-
-  if (strategy === 'heuristic' || model === HEURISTIC) {
-    return NextResponse.json(heuristic(null));
+  if (!config.apiKey) {
+    log.error('falta TYPESAFE_API_KEY', { model });
+    return fail(
+      'TypeSafe no esta configurado: falta TYPESAFE_API_KEY',
+      'model-not-configured',
+      502,
+    );
   }
 
+  // Se arma una sola vez: el mismo JSON se manda al modelo y se guarda en la
+  // traza, para que la consola muestre exactamente lo que viajo.
+  const alive = alivePlayers(snapshot);
+  const state = buildStatePrompt(snapshot);
+  const questions = buildQuestions(alive);
+  const requestBody: SystemOneRequest = { model, state, questions };
+
   try {
-    const alive = aliveSides(snapshot);
+    log.debug('consulta al modelo', {
+      model,
+      alive: alive.length,
+      clockMs: snapshot.clockMs,
+      ballSpeed: snapshot.ball.speed,
+      fieldMin: snapshot.field.min,
+    });
+
     if (alive.length === 0) {
+      log.debug('sin jugadores vivos', { model, ms: elapsedMs(startedAt) });
       return NextResponse.json<DecisionResponse>({
         model,
-        strategy: 'model',
         latencyMs: Date.now() - startedAt,
-        sides: {},
+        players: {},
         usage: { inputTokens: null, outputTokens: null },
-        fallbackReason: 'no queda ningun equipo vivo',
       });
     }
 
     const result = await askSystemOne({
       model,
-      state: buildStatePrompt(snapshot),
-      questions: buildQuestions(alive),
+      state,
+      questions,
       signal: request.signal,
       timeoutMs: config.timeoutMs,
     });
 
-    const sides: DecisionBundle = {};
-    for (const side of alive) {
-      const answer = result.answers[SIDE_NAME[side]];
+    const players: DecisionBundle = {};
+    for (const player of alive) {
+      const answer = result.answers[PLAYER_NAME[player]];
       if (!answer) {
-        throw new OllamaError('ollama-malformed', `El modelo no respondio por el equipo ${SIDE_NAME[side]}`);
+        log.warn('respuesta incompleta', {
+          model,
+          missing: PLAYER_NAME[player],
+          answered: Object.keys(result.answers),
+        });
+        throw new ModelError('model-malformed', `El modelo no respondio por el jugador ${PLAYER_NAME[player]}`);
       }
-      sides[side] = normalizeDecision(answer, side, 'model');
+      players[player] = normalizeDecision(answer);
     }
 
-    const response: DecisionResponse = {
-      model,
-      strategy: 'model',
-      latencyMs: Date.now() - startedAt,
-      sides,
-      usage: {
-        inputTokens: result.usage?.input_tokens ?? null,
-        outputTokens: result.usage?.output_tokens ?? null,
-      },
-      fallbackReason: null,
+    const usage = {
+      inputTokens: result.usage?.input_tokens ?? null,
+      outputTokens: result.usage?.output_tokens ?? null,
     };
-    return NextResponse.json(response);
+
+    if (traced) {
+      pushTrace({
+        model,
+        answeredModel: result.model ?? null,
+        request: requestBody,
+        response: result.responseBody,
+        moves: Object.fromEntries(
+          Object.entries(players).map(([player, decision]) => [player, decision?.move ?? '—']),
+        ),
+        usage,
+        latencyMs: Date.now() - startedAt,
+        alive: alive.length,
+        clockMs: snapshot.clockMs,
+        status: 'ok',
+        errorCode: null,
+        message: null,
+      });
+    }
+
+    log.info('decision', {
+      model,
+      answered: result.model ?? null,
+      ms: elapsedMs(startedAt),
+      alive: alive.length,
+      inTokens: usage.inputTokens,
+      outTokens: usage.outputTokens,
+    });
+    if (logsPrompts()) {
+      log.debug('jugadas', {
+        moves: Object.fromEntries(Object.entries(players).map(([player, move]) => [player, move?.move ?? '—'])),
+      });
+    }
+
+    return NextResponse.json<DecisionResponse>({
+      model,
+      latencyMs: Date.now() - startedAt,
+      players,
+      usage,
+    });
   } catch (error) {
-    // Si el cliente cancela, no hay a quien responder.
-    if (error instanceof Error && error.name === 'AbortError') return new Response(null, { status: 499 });
+    // Si el cliente cancela (cerro la pestana, recargo), no hay a quien
+    // responder y tampoco es un fallo del modelo.
+    if (request.signal.aborted || (error instanceof Error && error.name === 'AbortError')) {
+      log.debug('peticion cancelada por el cliente', { model, ms: elapsedMs(startedAt) });
+      return new Response(null, { status: 499 });
+    }
 
-    const ollamaError =
-      error instanceof OllamaError
+    const modelError =
+      error instanceof ModelError
         ? error
-        : new OllamaError('ollama-unreachable', error instanceof Error ? error.message : 'Error desconocido');
-
-    if (strategy === 'auto') return NextResponse.json(heuristic(ollamaError.message));
-    return fail(ollamaError.message, ollamaError.code, 502);
+        : new ModelError('model-unreachable', error instanceof Error ? error.message : 'Error desconocido');
+    log.error('fallo del modelo', {
+      code: modelError.code,
+      model,
+      ms: elapsedMs(startedAt),
+      error: modelError,
+    });
+    if (traced) {
+      pushTrace({
+        model,
+        answeredModel: null,
+        request: requestBody,
+        response: null,
+        moves: null,
+        usage: { inputTokens: null, outputTokens: null },
+        latencyMs: Date.now() - startedAt,
+        alive: alive.length,
+        clockMs: snapshot.clockMs,
+        status: 'error',
+        errorCode: modelError.code,
+        message: modelError.message,
+      });
+    }
+    return fail(modelError.message, modelError.code, 502);
   }
 }

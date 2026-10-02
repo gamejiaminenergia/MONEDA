@@ -1,36 +1,39 @@
 import {
+  BALL_SPEED,
   DEFAULT_INTERVAL_MS,
-  DEFAULT_LIVES,
+  MAX_BALL_SPEED,
   MAX_INTERVAL_MS,
+  MIN_BALL_SPEED,
   MIN_INTERVAL_MS,
 } from '@/lib/game/constants';
 
 import { createPersistentStore } from './store';
 
-export type Strategy = 'auto' | 'model' | 'heuristic';
-
 export interface GameSettings {
   model: string;
-  strategy: Strategy;
   intervalMs: number;
-  /** Vidas por equipo: al perder la ultima, el equipo muere. */
-  lives: number;
+  /** Velocidad de la bola, en px/s, ajustable en vivo. */
+  ballSpeed: number;
   muted: boolean;
-  showDebug: boolean;
+  /** Consola del modelo abierta (peticiones, respuestas y costo). */
+  showConsole: boolean;
+  /** Guardar cada peticion en la traza del servidor. */
+  trace: boolean;
 }
 
-export const HEURISTIC_MODEL = 'heuristic';
-
 export const defaultSettings: GameSettings = {
-  model: 'nimble',
-  strategy: 'auto',
+  // TypeSafe es el unico proveedor; `jev-latest` es su alias estable.
+  model: 'jev-latest',
   intervalMs: DEFAULT_INTERVAL_MS,
-  lives: DEFAULT_LIVES,
+  ballSpeed: BALL_SPEED,
   muted: false,
-  showDebug: false,
+  // La consola arranca abierta: es donde se ven peticiones, JSON y costo.
+  showConsole: true,
+  // Guardar cada peticion para poder verla despues.
+  trace: true,
 };
 
-const STORAGE_KEY = 'nimble.settings.v2';
+const STORAGE_KEY = 'nimble.settings.v8';
 
 const clampNumber = (value: number, min: number, max: number): number =>
   Math.max(min, Math.min(max, value));
@@ -41,19 +44,18 @@ export function parseSettings(raw: string | null): GameSettings | null {
   try {
     const stored = JSON.parse(raw) as Partial<GameSettings>;
     const interval = Number(stored.intervalMs);
-    const lives = Number(stored.lives);
+    const ballSpeed = Number(stored.ballSpeed);
     return {
       model: typeof stored.model === 'string' && stored.model ? stored.model : defaultSettings.model,
-      strategy:
-        stored.strategy === 'auto' || stored.strategy === 'model' || stored.strategy === 'heuristic'
-          ? stored.strategy
-          : defaultSettings.strategy,
       intervalMs: Number.isFinite(interval)
         ? clampNumber(interval, MIN_INTERVAL_MS, MAX_INTERVAL_MS)
         : defaultSettings.intervalMs,
-      lives: Number.isFinite(lives) && lives > 0 ? Math.round(lives) : defaultSettings.lives,
+      ballSpeed: Number.isFinite(ballSpeed)
+        ? clampNumber(ballSpeed, MIN_BALL_SPEED, MAX_BALL_SPEED)
+        : defaultSettings.ballSpeed,
       muted: stored.muted === true,
-      showDebug: stored.showDebug === true,
+      showConsole: stored.showConsole === true,
+      trace: stored.trace !== false,
     };
   } catch {
     return null;

@@ -1,149 +1,126 @@
 import { describe, expect, it } from 'vitest';
 
-import { CENTER, PADDLE_MAX_POS, PADDLE_MIN_POS, PLANE, W } from '@/lib/game/constants';
-import { PongWorld, contactLimit } from '@/lib/game/world';
+import { BALL_MAX, BALL_MIN, BALL_R, PAD } from '@/lib/game/constants';
+import { ballAt } from '@/lib/game/physics';
+import { ArenaWorld } from '@/lib/game/world';
 
 /** Un paso exacto de la simulacion. */
 const FRAME_MS = 1000 / 60;
 
-describe('PongWorld (planck/Box2D)', () => {
-  it('mientras el equipo vive la pared esta abierta y la bola se pierde', () => {
-    const world = new PongWorld();
-    // Los paddles del equipo superior se apartan para no interceptar.
-    world.setPaddle('top', 0, PADDLE_MIN_POS);
-    world.setPaddle('top', 1, PADDLE_MAX_POS);
-    world.setBall({ x: W / 2, y: 300, vx: 0, vy: -250 });
+const speed = (ball: { vx: number; vy: number }): number => Math.hypot(ball.vx, ball.vy);
 
-    let miss = null;
-    for (let step = 0; step < 300 && !miss; step++) {
-      miss = world.step(FRAME_MS).miss;
-    }
+describe('ArenaWorld (planck/Box2D)', () => {
+  it('la bola rebota contra la pared sin perderse', () => {
+    const world = new ArenaWorld();
+    world.setBall({ x: 600, y: 360, vx: 250, vy: 0 });
 
-    expect(miss).toBe('top');
-  });
-
-  it('cuando el equipo muere su pared se sella y rebota con la misma energia', () => {
-    const world = new PongWorld();
-    world.killTeam('top');
-    world.setPaddle('left', 0, PADDLE_MIN_POS);
-    world.setPaddle('left', 1, PADDLE_MAX_POS);
-    world.setPaddle('right', 0, PADDLE_MIN_POS);
-    world.setPaddle('right', 1, PADDLE_MAX_POS);
-    world.setBall({ x: W / 2, y: 300, vx: 0, vy: -300 });
-
-    let bounced = null;
-    for (let step = 0; step < 300 && !bounced; step++) {
-      const result = world.step(FRAME_MS);
-      expect(result.miss).toBeNull();
-      const ball = world.ball();
-      if (ball.vy > 0) bounced = ball;
-    }
-
-    expect(bounced).not.toBeNull();
-    expect(bounced?.vy).toBeCloseTo(300, 0);
-    expect(bounced?.y).toBeGreaterThanOrEqual(PLANE);
-  });
-
-  it('rebota aunque el golpe contra el muro sea muy suave', () => {
-    // 0.2 m/s: por debajo del umbral por defecto de Box2D el choque seria
-    // inelastico y la bola se quedaria pegada a la pared.
-    const world = new PongWorld();
-    world.killTeam('left');
-    world.setBall({ x: 120, y: 300, vx: -20, vy: 0 });
-
-    for (let step = 0; step < 300; step++) {
-      world.step(FRAME_MS);
-      if (world.ball().vx > 0) break;
-    }
-
-    expect(world.ball().vx).toBeGreaterThan(0);
-  });
-
-  it('la llegada prevista es la llegada real', () => {
-    const world = new PongWorld();
-    world.setBall({ x: W / 2, y: CENTER, vx: 250, vy: -180 });
-    const predicted = world.predictArrival('right');
-
-    // Los paddles se ponen lejos de la trayectoria: la bola debe llegar sola.
-    const away = predicted > CENTER ? PADDLE_MIN_POS : PADDLE_MAX_POS;
-    world.setPaddle('right', 0, away);
-    world.setPaddle('right', 1, away);
-
-    const target = contactLimit('right');
-    let actual: number | null = null;
-
-    for (let step = 0; step < 900; step++) {
-      const before = world.ball();
-      const result = world.step(FRAME_MS);
-      expect(result.contacts).toHaveLength(0);
-      const after = world.ball();
-      if (after.x >= target) {
-        const span = after.x - before.x;
-        actual = span === 0 ? after.y : before.y + (after.y - before.y) * ((target - before.x) / span);
-        break;
-      }
-    }
-
-    expect(actual).not.toBeNull();
-    expect(Math.abs((actual as number) - predicted)).toBeLessThan(1);
-  });
-
-  it('predice tambien en los equipos de arriba y abajo', () => {
-    const world = new PongWorld();
-    world.setBall({ x: CENTER, y: W / 2, vx: 180, vy: 250 });
-    const predicted = world.predictArrival('bottom');
-
-    const away = predicted > CENTER ? PADDLE_MIN_POS : PADDLE_MAX_POS;
-    world.setPaddle('bottom', 0, away);
-    world.setPaddle('bottom', 1, away);
-
-    const target = contactLimit('bottom');
-    let actual: number | null = null;
-
-    for (let step = 0; step < 900; step++) {
-      const before = world.ball();
-      world.step(FRAME_MS);
-      const after = world.ball();
-      if (after.y >= target) {
-        const span = after.y - before.y;
-        actual = span === 0 ? after.x : before.x + (after.x - before.x) * ((target - before.y) / span);
-        break;
-      }
-    }
-
-    expect(actual).not.toBeNull();
-    expect(Math.abs((actual as number) - predicted)).toBeLessThan(1);
-  });
-
-  it('no atraviesa un paddle aunque la bola vaya a 80 m/s', () => {
-    const world = new PongWorld();
-    world.setPaddle('right', 0, CENTER);
-    world.setPaddle('right', 1, CENTER + 200);
-    world.setBall({ x: W / 2, y: CENTER, vx: 8000, vy: 0 });
-
-    let contacts = 0;
-    for (let step = 0; step < 60 && contacts === 0; step++) {
-      contacts += world.step(FRAME_MS).contacts.length;
-    }
-
-    expect(contacts).toBeGreaterThan(0);
-  });
-
-  it('el muro de un equipo muerto tambien aparece en la prediccion', () => {
-    const world = new PongWorld();
-    world.killTeam('left');
-    world.setBall({ x: W / 2, y: CENTER, vx: -250, vy: 0 });
-
-    // Sin muro la bola llegaria al plano; con el muro, rebota antes y la
-    // prediccion tiene que devolver donde esta ahora, no donde llegaria.
-    const arrival = world.predictArrival('left');
     let bounced = false;
     for (let step = 0; step < 300 && !bounced; step++) {
-      world.step(FRAME_MS);
-      if (world.ball().vx > 0) bounced = true;
+      const result = world.step(FRAME_MS);
+      expect(result.walls.length).toBeGreaterThanOrEqual(0);
+      if (world.ball().vx < 0) bounced = true;
     }
 
     expect(bounced).toBe(true);
-    expect(Number.isFinite(arrival)).toBe(true);
+  });
+
+  it('reporta el punto del rebote', () => {
+    const world = new ArenaWorld();
+    world.setBall({ x: 600, y: 360, vx: 250, vy: 0 });
+
+    let hit: { x: number; y: number } | null = null;
+    for (let step = 0; step < 300 && !hit; step++) {
+      const result = world.step(FRAME_MS);
+      hit = result.walls[0] ?? null;
+    }
+
+    expect(hit).not.toBeNull();
+    expect((hit as { x: number }).x).toBeGreaterThan(BALL_MAX - 1);
+    expect((hit as { x: number }).x).toBeLessThanOrEqual(BALL_MAX + BALL_R);
+  });
+
+  it('conserva la misma energia en cada rebote', () => {
+    const world = new ArenaWorld();
+    world.setBall({ x: 360, y: 100, vx: 240, vy: 120 });
+    const before = speed(world.ball());
+
+    for (let step = 0; step < 2000; step++) world.step(FRAME_MS);
+
+    const after = speed(world.ball());
+    expect(after).toBeGreaterThan(before * 0.9);
+    expect(after).toBeLessThan(before * 1.1);
+  });
+
+  it('rebota aunque el golpe contra la pared sea muy suave', () => {
+    // 0.2 m/s: por debajo del umbral por defecto de Box2D el choque seria
+    // inelastico y la bola se quedaria pegada a la pared.
+    const world = new ArenaWorld();
+    world.setBall({ x: 200, y: 100, vx: 0, vy: -20 });
+
+    for (let step = 0; step < 400; step++) {
+      world.step(FRAME_MS);
+      if (world.ball().vy > 0) break;
+    }
+
+    expect(world.ball().vy).toBeGreaterThan(0);
+  });
+
+  it('nunca sale de la mesa, ni tras muchos rebotes', () => {
+    const world = new ArenaWorld();
+    world.setBall({ x: 360, y: 360, vx: 300, vy: 210 });
+
+    for (let step = 0; step < 3000; step++) {
+      world.step(FRAME_MS);
+      const ball = world.ball();
+      expect(ball.x).toBeGreaterThanOrEqual(BALL_MIN - 1);
+      expect(ball.x).toBeLessThanOrEqual(BALL_MAX + 1);
+      expect(ball.y).toBeGreaterThanOrEqual(BALL_MIN - 1);
+      expect(ball.y).toBeLessThanOrEqual(BALL_MAX + 1);
+    }
+  });
+
+  it('el recorrido real coincide con la trayectoria prevista', () => {
+    // Tolerancia de 6 px tras 2,4 s: Box2D deja la penetracion del contacto
+    // corregida a lo largo de unos pasos, asi que la fase se desvia un poco
+    // respecto de la formula cerrada. Es despreciable para jugar y para avisar
+    // de una amenaza (el radio mortal es de 24 px), y en el juego la
+    // prediccion se recalcula desde el estado real en cada decision.
+    const start = { x: 360, y: 90, vx: 210, vy: 260 };
+
+    for (const ms of [500, 1200, 2400]) {
+      const other = new ArenaWorld();
+      other.setBall(start);
+      let elapsed = 0;
+      while (elapsed < ms) {
+        other.step(FRAME_MS);
+        elapsed += FRAME_MS;
+      }
+      const actual = other.ball();
+      const predicted = ballAt(start, ms);
+      expect(Math.abs(actual.x - predicted.x)).toBeLessThan(6);
+      expect(Math.abs(actual.y - predicted.y)).toBeLessThan(6);
+    }
+  });
+
+  it('el tramo del paso cubre de verdad lo que recorrio la bola', () => {
+    const world = new ArenaWorld();
+    world.setBall({ x: 360, y: 360, vx: 3000, vy: 0 });
+    const before = world.ball();
+    const { sweep } = world.step(FRAME_MS);
+    const after = world.ball();
+
+    expect(sweep).not.toBeNull();
+    expect(sweep?.from.x).toBeCloseTo(before.x, 5);
+    expect(sweep?.to.x).toBeCloseTo(after.x, 5);
+    // A 3000 px/s un paso son 50 px: si el tramo no los cubriera, el roce se
+    // saltaria entre frames.
+    expect(Math.abs((sweep?.to.x ?? 0) - (sweep?.from.x ?? 0))).toBeGreaterThan(10);
+  });
+
+  it('la pared interior es la cara del marco, no su centro', () => {
+    const world = new ArenaWorld();
+    world.setBall({ x: 200, y: 360, vx: 0, vy: -250 });
+    for (let step = 0; step < 300; step++) world.step(FRAME_MS);
+    expect(world.ball().y).toBeGreaterThanOrEqual(PAD);
   });
 });
