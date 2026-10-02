@@ -1,0 +1,15 @@
+# Normaliza los finales de linea en el repositorio (Windows incluido).
+* text=auto eol=lf
+
+# Binarios: git no los toca.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+
+# Los lockfiles y las capturas no ensucian los diffs.
+package-lock.json linguist-generated=true
+/docs/screenshot.png linguist-vendored
