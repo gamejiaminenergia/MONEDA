@@ -24,6 +24,8 @@ const log = logger.child('mongo');
 
 /** La unica coleccion del historico. */
 export const MATCHES_COLLECTION = 'matches';
+/** Historico de BOLSA: una coleccion aparte, mismo patron. */
+export const SESSIONS_COLLECTION = 'sessions';
 const DEFAULT_DB = 'nimble';
 
 interface MongoHandle {
@@ -73,6 +75,8 @@ async function connect(): Promise<MongoHandle | null> {
   // se confundan aunque se reintente el guardado.
   await matches.createIndex({ at: -1 });
   await matches.createIndex({ matchId: 1 }, { unique: true });
+  // Historico de BOLSA: una coleccion aparte con la misma forma de indice.
+  await db.collection(SESSIONS_COLLECTION).createIndex({ at: -1 });
   log.info('conectado', { target: mongoTarget(), db: mongoDatabaseName(), collection: MATCHES_COLLECTION });
   return { client, db };
 }
@@ -175,5 +179,59 @@ export async function getMatch(matchId: string): Promise<SavedMatch | null> {
   } catch (error) {
     log.warn('no se pudo leer la partida', { matchId, error });
     return null;
+  }
+}
+
+/** Documento de una sesion de BOLSA: la partida entera, como en `matches`. */
+export interface SessionDocument {
+  sessionId: string;
+  model: string;
+  outcome: 'agentes' | 'escasez';
+  horizonHours: number;
+  hours: unknown;
+  generators: unknown;
+  log: unknown;
+}
+
+export type SavedSession = SessionDocument & { id: string; at: string };
+
+/** Guarda una sesion de BOLSA. Devuelve el `_id` o `null` si no se pudo. */
+export async function saveSession(record: SessionDocument): Promise<string | null> {
+  try {
+    const handle = await getHandle();
+    if (!handle) return null;
+    const document = { ...record, at: new Date().toISOString() };
+    const result = await handle.db.collection(SESSIONS_COLLECTION).insertOne(document);
+    log.info('sesion guardada', {
+      id: result.insertedId.toString(),
+      sessionId: record.sessionId,
+      outcome: record.outcome,
+      horas: Array.isArray(record.hours) ? record.hours.length : 0,
+    });
+    return result.insertedId.toString();
+  } catch (error) {
+    log.warn('no se pudo guardar la sesion', { error });
+    return null;
+  }
+}
+
+/** Ultimas sesiones de BOLSA, la mas reciente primero. Vacio si Mongo no esta. */
+export async function listSessions(limit = 50): Promise<SavedSession[]> {
+  try {
+    const handle = await getHandle();
+    if (!handle) return [];
+    const documents = await handle.db
+      .collection(SESSIONS_COLLECTION)
+      .find({})
+      .sort({ at: -1 })
+      .limit(limit)
+      .toArray();
+    return documents.map((document) => {
+      const { _id, ...rest } = document;
+      return { id: _id.toString(), ...rest } as unknown as SavedSession;
+    });
+  } catch (error) {
+    log.warn('no se pudo leer las sesiones', { error });
+    return [];
   }
 }

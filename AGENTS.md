@@ -79,3 +79,14 @@ No son estilo: romperlas cambia el juego o tira los tests.
 | React, HUD y atajos | `src/components/`, `src/hooks/` |
 | Peticiones al modelo y costos | `src/server/trace.ts`, `src/lib/ai/pricing.ts`, `docs/PLAN-FRONTEND.md` |
 | API y TypeSafe | `src/app/api/*`, `src/server/` |
+
+## Informes ejecutivos
+
+- Cuando el usuario pida un **informe ejecutivo**, no basta con datos: cada
+  seccion termina con **Conclusion**, **Tips** y **Advertencias** (añade
+  **Riesgos** o **Recomendaciones** si aportan). Un informe sin esos bloques no
+  es un informe ejecutivo.
+- El informe abre con veredicto y una linea de "como leerlo", y cierra con
+  conclusiones generales y recomendaciones antes del anexo de datos crudos.
+- Cada cifra se puede recalcular (script o consulta citada); los juicios van
+  siempre pegados a su dato.

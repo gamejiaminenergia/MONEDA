@@ -509,6 +509,19 @@ git push -u origin main
 
 Si prefieres HTTPS: `git remote add origin https://github.com/USUARIO/REPO.git`.
 
+## BOLSA — el mismo motor, ahora como mercado
+
+Este repositorio incluye un segundo juego, **BOLSA**, que refleja lo basico del
+mercado mayorista colombiano (MEM) con el mismo esqueleto que Nimble Pong: motor
+determinista, decisiones de IA por agente y mesa viva. La diferencia es la que
+faltaba en las bolitas: **interaccion por precio**. Seis agentes (hidraulicas y
+termicas) ofertan cada hora, el operador despacha por orden de merito y el precio
+de la ultima unidad despachada lo cobran todos. Ganan si cubren la demanda las
+24 horas; si no, gana la escasez.
+
+Se abre en `/bolsa`. Concepto en `docs/bolsa/`, la comparacion con el MEM en
+`docs/bolitas/INFORME-BOLITAS-MEM.md` y las consultas reales en `docs/mem/`.
+
 ## Licencia
 
 MIT. Ver [`LICENSE`](LICENSE).
