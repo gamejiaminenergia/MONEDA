@@ -15,19 +15,12 @@ import { matchesConfigured, mongoDatabaseName, mongoTarget } from '@/server/mong
 const record = <T>(value: (player: Player) => T): PlayerRecord<T> =>
   Object.fromEntries(PLAYERS.map((player) => [player, value(player)])) as PlayerRecord<T>;
 
-const samplePlayers = record(() => ({
-  x: 100,
-  y: 100,
-  alive: true,
-  cell: { col: 0, row: 0 },
-  cellCount: 1,
-}));
+const samplePlayers = record(() => ({ x: 100, y: 100, alive: true }));
 
 const document = () => ({
   matchId: 'abc-123',
   round: 4,
-  outcome: 'truce' as const,
-  winner: null,
+  outcome: 'players' as const,
   model: 'jev-latest',
   config: {
     intervalMs: 700,
@@ -36,7 +29,6 @@ const document = () => ({
     killRadius: 24,
     dangerRadius: 54,
     survivalMs: 60_000,
-    grid: { cols: 16, rows: 16, cell: 42, limit: 3, strikes: 5, checkMs: 200 },
   },
   result: {
     clockMs: 60_000,
@@ -46,7 +38,6 @@ const document = () => ({
     avgLatencyMs: 250,
     bounces: 40,
     kills: 3,
-    crowdKills: 2,
     aliveCount: 10,
     alive: [...PLAYERS],
   },
@@ -64,14 +55,18 @@ const document = () => ({
   ],
   events: [
     { clockMs: 0, type: 'wall', x: 24, y: 30 },
-    { clockMs: 100, type: 'kill', player: 'rojo', x: 10, y: 10, cause: 'crowd' },
-    { clockMs: 60_000, type: 'truce' },
+    { clockMs: 100, type: 'kill', player: 'rojo', x: 10, y: 10 },
+    { clockMs: 60_000, type: 'over', winner: 'players' },
   ],
 });
 
 describe('contrato de partida', () => {
   it('acepta una partida completa con su trayectoria', () => {
     expect(matchDocumentSchema.safeParse(document()).success).toBe(true);
+  });
+
+  it('acepta que gane la bola negra (mato a todos)', () => {
+    expect(matchDocumentSchema.safeParse({ ...document(), outcome: 'ball' }).success).toBe(true);
   });
 
   it('exige los diez jugadores en cada muestra', () => {
@@ -86,19 +81,18 @@ describe('contrato de partida', () => {
     expect(matchDocumentSchema.safeParse({ ...document(), outcome: 'empate' }).success).toBe(false);
   });
 
-  it('rechaza un ganador que no es un color', () => {
-    expect(matchDocumentSchema.safeParse({ ...document(), winner: 'fucsia' }).success).toBe(false);
+  it('rechaza numeros negativos', () => {
+    expect(matchDocumentSchema.safeParse({ ...document(), round: -1 }).success).toBe(false);
   });
 });
 
 describe('solo partidas completas', () => {
-  it('cuenta como completa la tregua (llego al minuto)', () => {
-    expect(isCompleteMatch({ outcome: 'truce' })).toBe(true);
+  it('cuenta como completa la victoria de las bolitas (llego al minuto)', () => {
+    expect(isCompleteMatch({ outcome: 'players' })).toBe(true);
   });
 
-  it('no cuenta como completa ni el ganador ni el empate', () => {
-    expect(isCompleteMatch({ outcome: 'winner' })).toBe(false);
-    expect(isCompleteMatch({ outcome: 'draw' })).toBe(false);
+  it('no cuenta como completa la victoria de la bola negra', () => {
+    expect(isCompleteMatch({ outcome: 'ball' })).toBe(false);
   });
 });
 
@@ -112,33 +106,24 @@ describe('grabador de partidas', () => {
       threatMs: null,
       threatX: null,
       threatY: null,
-      cell: { col: 0, row: 0 },
-      cellCount: 1,
       alive: true,
     })),
     killRadius: 24,
     dangerRadius: 54,
     field: { min: 38, max: 682 },
     ballField: { min: 34, max: 686 },
-    grid: { cell: 42, cols: 16, rows: 16, limit: 3, strikes: 5, checkMs: 200 },
     runnerSpeed: 300,
     survivalMs: 60_000,
     clockMs: 60_000,
     paused: false,
-    winner: null,
   });
 
-  const view = (clockMs: number) => {
-    const counts = new Array<number>(16 * 16).fill(0);
-    counts[0] = PLAYERS.length;
-    return {
-      clockMs,
-      ball: { x: 360, y: 360, vx: 10, vy: 0 },
-      runners: record(() => ({ x: 40, y: 40 })),
-      alive: record(() => true),
-      grid: { counts, cols: 16 },
-    };
-  };
+  const view = (clockMs: number) => ({
+    clockMs,
+    ball: { x: 360, y: 360, vx: 10, vy: 0 },
+    runners: record(() => ({ x: 40, y: 40 })),
+    alive: record(() => true),
+  });
 
   const decision = (): DecisionResponse => ({
     model: 'jev-latest',
@@ -153,12 +138,11 @@ describe('grabador de partidas', () => {
     recorder.finish(
       {
         round: 1,
-        outcome: 'truce',
-        winner: null,
+        outcome: 'players',
         model: 'jev-latest',
         intervalMs: 700,
         snapshot: snapshot(),
-        stats: { decisions: 5, avgLatencyMs: 200, bounces: 3, kills: 1, crowdKills: 0, aliveCount: 10 },
+        stats: { decisions: 5, avgLatencyMs: 200, bounces: 3, kills: 1, aliveCount: 10 },
       },
       'match-1',
     );
@@ -168,14 +152,13 @@ describe('grabador de partidas', () => {
     recorder.sample(view(0));
     recorder.sample(view(200));
     recorder.decision(decision(), 200);
-    const event: GameEvent = { type: 'kill', player: 'rojo', x: 12, y: 14, cause: 'crowd' };
+    const event: GameEvent = { type: 'kill', player: 'rojo', x: 12, y: 14 };
     recorder.note(event, 300);
 
     const doc = finish(recorder);
     expect(doc.samples).toHaveLength(2);
     expect(doc.decisions).toHaveLength(1);
     expect(doc.events).toHaveLength(1);
-    expect(doc.samples[0]?.players.rojo.cellCount).toBe(PLAYERS.length);
     expect(doc.decisions[0]?.moves.rojo).toBe('derecha');
     expect(doc.config.survivalMs).toBe(60_000);
     expect(doc.result.survivalMs).toBe(60_000);

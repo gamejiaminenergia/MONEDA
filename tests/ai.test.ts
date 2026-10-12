@@ -79,7 +79,7 @@ describe('bucle de rondas', () => {
     };
   };
 
-  it('toda ronda termina: gana el ultimo en pie o se la lleva la grilla', () => {
+  it('toda ronda termina: en tregua o con la bola matando a todos', () => {
     for (let seed = 1; seed <= 8; seed++) {
       const engine = new GameEngine({ random: seededRandom(seed) });
       let elapsed = 0;
@@ -99,24 +99,21 @@ describe('bucle de rondas', () => {
       }
 
       expect(engine.finished).toBe(true);
+      const winner = engine.ui().winner;
       const alive = engine.alivePlayers();
-      if (engine.ui().winner) {
-        expect(alive).toHaveLength(1);
-        expect(engine.ui().winner).toBe(alive[0]);
-      } else if (engine.ui().truce) {
-        // Aguanto el minuto: reviven los muertos y la ronda es de todos.
+      if (winner === 'players') {
+        // Aguanto el minuto: reviven los muertos y ganan las bolitas.
         expect(alive).toHaveLength(PLAYERS.length);
       } else {
-        // La grilla se llevo a todos: ronda cerrada sin ganador, sin colgarse.
-        expect(engine.ui().draw).toBe(true);
+        // La bola negra mato a todos: ella gana.
+        expect(winner).toBe('ball');
         expect(alive).toHaveLength(0);
       }
 
       // El reinicio que dispara la UI deja la mesa lista para la ronda siguiente.
       engine.reset();
       expect(engine.finished).toBe(false);
-      expect(engine.ui().draw).toBe(false);
-      expect(engine.ui().truce).toBe(false);
+      expect(engine.ui().winner).toBeNull();
       expect(engine.alivePlayers()).toHaveLength(PLAYERS.length);
       expect(engine.isPaused).toBe(false);
     }

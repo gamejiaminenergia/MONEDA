@@ -20,6 +20,12 @@ export const dynamic = 'force-dynamic';
 
 const log = logger.child('api/matches');
 
+/** `MATCHES_ONLY_COMPLETE=1` restringe el historico a las rondas del minuto. */
+const onlyCompleteMatches = (): boolean => {
+  const raw = (process.env.MATCHES_ONLY_COMPLETE ?? '').trim().toLowerCase();
+  return raw === '1' || raw === 'true';
+};
+
 export async function POST(request: Request) {
   let body: unknown;
   try {
@@ -35,8 +41,9 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'La partida no tiene el formato esperado' }, { status: 400 });
   }
 
-  // Solo partidas completas: una ronda que no llego al minuto no se guarda.
-  if (!isCompleteMatch(parsed.data)) {
+  // Por defecto se guarda toda ronda que termina (marcada por `outcome`). Con
+  // MATCHES_ONLY_COMPLETE=1 vuelve la regla vieja: solo la del minuto.
+  if (onlyCompleteMatches() && !isCompleteMatch(parsed.data)) {
     takeModelCalls(parsed.data.matchId);
     return NextResponse.json(
       { stored: false, reason: 'la partida no se completo' },

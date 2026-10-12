@@ -1,6 +1,5 @@
 import type { DecisionResponse, MatchDocument, MatchEventRecord } from '@/lib/ai/contracts';
-import { cellIndex, cellOf } from '@/lib/game/grid';
-import { PLAYERS, type Player } from '@/lib/game/players';
+import { PLAYERS } from '@/lib/game/players';
 import type { GameEvent, GameSnapshot, PlayerRecord, UiState } from '@/lib/game/types';
 
 /**
@@ -10,15 +9,15 @@ import type { GameEvent, GameSnapshot, PlayerRecord, UiState } from '@/lib/game/
  * partida completa es el cliente: aqui se acumulan tres series que se fechan
  * con el reloj de ronda —
  *
- *  - `samples`: fotos de la mesa (bola + diez corredores + celda) cada ~200 ms;
+ *  - `samples`: fotos de la mesa (bola + diez corredores) cada ~200 ms;
  *  - `decisions`: que respondio el modelo en cada turno, con sus probabilidades;
- *  - `events`: cada rebote, saque, muerte y el cierre, con su causa.
+ *  - `events`: cada rebote, saque, muerte y el cierre.
  *
  * No inventa nada ni decide que guardar: solo junta. `finish()` arma el
  * documento y el llamador decide si esa partida merece guardarse.
  */
 
-/** Cada cuanto se pide una foto de la mesa. Coincide con la revision de la grilla. */
+/** Cada cuanto se pide una foto de la mesa. */
 export const SAMPLE_MS = 200;
 
 /** Topes alineados con el contrato: mas alla, Mongo recibiria un doc invalido. */
@@ -32,22 +31,17 @@ export interface RecorderView {
   ball: { x: number; y: number; vx: number; vy: number };
   runners: PlayerRecord<{ x: number; y: number }>;
   alive: PlayerRecord<boolean>;
-  grid: { counts: number[]; cols: number };
 }
 
 export interface FinishInput {
   round: number;
   outcome: MatchDocument['outcome'];
-  winner: Player | null;
   model: string;
   intervalMs: number;
   /** Estado final (configuracion y ultima foto con amenazas). */
   snapshot: GameSnapshot;
   /** Contadores de ronda. */
-  stats: Pick<
-    UiState,
-    'decisions' | 'avgLatencyMs' | 'bounces' | 'kills' | 'crowdKills' | 'aliveCount'
-  >;
+  stats: Pick<UiState, 'decisions' | 'avgLatencyMs' | 'bounces' | 'kills' | 'aliveCount'>;
 }
 
 const round = (value: number): number => Math.round(value);
@@ -76,22 +70,13 @@ export class MatchRecorder {
     this.lastClockMs = view.clockMs;
     if (this.samples.length >= MAX_SAMPLES) return;
 
-    const players = {} as PlayerRecord<{
-      x: number;
-      y: number;
-      alive: boolean;
-      cell: { col: number; row: number };
-      cellCount: number;
-    }>;
+    const players = {} as PlayerRecord<{ x: number; y: number; alive: boolean }>;
     for (const player of PLAYERS) {
       const runner = view.runners[player];
-      const cell = cellOf(runner);
       players[player] = {
         x: round(runner.x),
         y: round(runner.y),
         alive: view.alive[player],
-        cell,
-        cellCount: view.grid.counts[cellIndex(cell.col, cell.row)] ?? 0,
       };
     }
 
@@ -148,7 +133,6 @@ export class MatchRecorder {
           player: event.player,
           x: round(event.x),
           y: round(event.y),
-          cause: event.cause,
         };
         break;
       case 'death':
@@ -157,11 +141,8 @@ export class MatchRecorder {
       case 'serve':
         record = { clockMs: at, type: 'serve', toward: event.toward };
         break;
-      case 'game-over':
-        record = { clockMs: at, type: 'game-over', winner: event.winner };
-        break;
-      case 'truce':
-        record = { clockMs: at, type: 'truce' };
+      case 'over':
+        record = { clockMs: at, type: 'over', winner: event.winner };
         break;
       default:
         return;
@@ -178,7 +159,6 @@ export class MatchRecorder {
       matchId,
       round: input.round,
       outcome: input.outcome,
-      winner: input.winner,
       model: input.model,
       config: {
         intervalMs: input.intervalMs,
@@ -187,7 +167,6 @@ export class MatchRecorder {
         killRadius: snapshot.killRadius,
         dangerRadius: snapshot.dangerRadius,
         survivalMs: snapshot.survivalMs,
-        grid: snapshot.grid,
       },
       result: {
         clockMs: snapshot.clockMs,
@@ -197,7 +176,6 @@ export class MatchRecorder {
         avgLatencyMs: stats.avgLatencyMs,
         bounces: stats.bounces,
         kills: stats.kills,
-        crowdKills: stats.crowdKills,
         aliveCount: stats.aliveCount,
         alive,
       },

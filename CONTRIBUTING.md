@@ -36,10 +36,11 @@ no sabe que existe TypeSafe.**
   muerte y el estado de los diez jugadores.
 - `src/lib/ai/` — contratos con zod y normalizacion de respuestas.
 - `src/app/api/` y `src/server/` — lo unico que habla con TypeSafe y con Mongo.
-- `docker-compose.yml` y `src/server/mongo.ts` — MongoDB del historico; solo se
-  guardan partidas completas (la que aguanta el minuto) en la coleccion
-  `matches`. `src/lib/client/match-recorder.ts` junta la telemetria en el
-  navegador. Sin `MONGO_URL` el juego corre igual: guardar nunca es obligatorio.
+- `docker-compose.yml` y `src/server/mongo.ts` — MongoDB del historico: cada
+  ronda que termina cae en la coleccion `matches` (con `MATCHES_ONLY_COMPLETE=1`
+  solo las del minuto). `src/lib/client/match-recorder.ts` junta la telemetria
+  en el navegador. Sin `MONGO_URL` el juego corre igual: guardar nunca es
+  obligatorio.
 - `src/lib/client/board/` — la escena de Phaser 4: dibujo, particulas, camara y
   audio. Avanza el motor y sincroniza la mesa con `engine.view()`.
 - `src/lib/client/` + `src/components/` — bucle de decisiones, stores y React.

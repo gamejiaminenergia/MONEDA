@@ -39,10 +39,9 @@ export const BALL_SPEED_STEP = 10;
 export const BALL_SPEED = MAX_BALL_SPEED;
 
 /**
- * La meta colectiva. Si la ronda llega a este tiempo con al menos un jugador
- * vivo, no gana uno: reviven los muertos y ganan todos (una tregua). Es el
- * unico cierre que premia sobrevivir en grupo, y el motivo de que el techo de
- * la bola haya subido: aguantar un minuto con la bola al doble es la hazaña.
+ * El round dura un minuto y siempre acaba con un ganador: si al cumplirlo queda
+ * al menos un jugador vivo, reviven los muertos y **ganan las bolitas**; si la
+ * bola los mata a todos antes, **gana la bola negra**. No hay tregua ni empate.
  */
 export const SURVIVAL_MS = 60_000;
 
@@ -73,28 +72,6 @@ export const BALL_MAX = W - PAD - BALL_R;
 export const KILL_R = BALL_R + RUNNER_R;
 /** Radio de aviso: la prediccion avisa antes de que el roce sea mortal. */
 export const DANGER_R = KILL_R + 30;
-
-/**
- * La grilla antiagolpamiento.
- *
- * La mesa se parte en celdas del tamano justo para un cuerpo: compartir una
- * celda ya es pisarse. Si una celda pasa de `CROWD_LIMIT` corredores vivos y lo
- * aguanta `CROWD_STRIKES` revisiones seguidas (`CROWD_CHECK_MS` cada una),
- * revienta y mueren todos los que estan dentro. Es el castigo a acampar en un
- * rincon: la unica regla que ata a los jugadores entre si en vez de a la bola.
- *
- * `GRID_CELL` sale de repartir el ancho jugable (sin marco) en `GRID_COLS`
- * columnas; con 16 celdas da 42 px, poco mas que el diametro de un corredor.
- */
-export const GRID_COLS = 16;
-export const GRID_ROWS = 16;
-export const GRID_CELL = (W - 2 * PAD) / GRID_COLS;
-/** Mas de esto en una celda: cuatro o mas. */
-export const CROWD_LIMIT = 3;
-/** Cada cuanto se revisa la aglomeracion. */
-export const CROWD_CHECK_MS = 200;
-/** Revisiones consecutivas sobre el limite antes de que la celda reviente. */
-export const CROWD_STRIKES = 5;
 
 export const DEFAULT_INTERVAL_MS = 700;
 export const MIN_INTERVAL_MS = 300;

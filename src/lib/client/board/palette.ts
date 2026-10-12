@@ -19,10 +19,6 @@ export interface BoardPalette {
   ring: number;
   /** Marco de la mesa. */
   line: number;
-  /** Lineas tenues de la grilla antiagolpamiento. */
-  grid: number;
-  /** Relleno de una celda sobre el limite: la que va a reventar. */
-  crowd: number;
   ball: number;
   ballGlow: number;
   ballGlowAlpha: number;
@@ -53,8 +49,6 @@ export const BOARD_PALETTES: Record<BoardTheme, BoardPalette> = {
     bgBottom: 0x060911,
     ring: 0x141f36,
     line: 0x22304d,
-    grid: 0x2f466e,
-    crowd: 0xff5c5c,
     ball: 0xffffff,
     ballGlow: 0x9fe8ff,
     ballGlowAlpha: 0.13,
@@ -77,8 +71,6 @@ export const BOARD_PALETTES: Record<BoardTheme, BoardPalette> = {
     bgBottom: 0xe6ecf6,
     ring: 0xc3cfe4,
     line: 0xb6c5dd,
-    grid: 0x9aaecf,
-    crowd: 0xcf2b21,
     ball: 0x101a2e,
     ballGlow: 0x0e7f9e,
     ballGlowAlpha: 0.16,

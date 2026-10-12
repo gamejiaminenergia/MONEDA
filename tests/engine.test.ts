@@ -58,7 +58,6 @@ describe('GameEngine (diez jugadores)', () => {
     engine = new GameEngine({
       random: () => 0.25,
       servePauseMs: 0,
-      crowd: false,
       survivalMs: Number.POSITIVE_INFINITY,
     });
   });
@@ -134,9 +133,11 @@ describe('GameEngine (diez jugadores)', () => {
     expect(engine.view().runners[VICTIM].x).toBe(before.x);
   });
 
-  it('la partida termina cuando queda un solo jugador vivo', () => {
-    const survivors: Player[] = [];
-    while (!engine.finished && survivors.length < PLAYERS.length) {
+  it('quedar un solo vivo no cierra la ronda: sigue hasta el minuto o el wipe', () => {
+    // Los diez estan del mismo lado; quedar uno no cierra nada. Solo el wipe
+    // (la bola matando a todos) cierra antes, y ahi gana la bola negra.
+    let killed = 0;
+    while (killed < PLAYERS.length - 1) {
       const victim = PLAYERS.find((player) => engine.isAlive(player));
       if (!victim) break;
       parkOthers(engine, victim);
@@ -146,12 +147,23 @@ describe('GameEngine (diez jugadores)', () => {
         engine.forceServe(0, 250);
         continue;
       }
-      survivors.push(victim);
+      killed += 1;
     }
 
-    expect(engine.finished).toBe(true);
+    // Nueve muertos, uno vivo: la ronda sigue en pie.
     expect(engine.alivePlayers()).toHaveLength(1);
-    expect(engine.ui().winner).toBe(engine.alivePlayers()[0]);
+    expect(engine.finished).toBe(false);
+
+    // El ultimo tambien cae: ahora si cierra, y gana la bola negra.
+    const last = engine.alivePlayers()[0];
+    if (!last) throw new Error('sin ultimo jugador');
+    engine.moveRunnerTo(last, CENTER);
+    engine.forceServe(0, 250);
+    const events = runUntil(engine, (all) => all.some((event) => event.type === 'over'), 1200);
+    expect(events.some((event) => event.type === 'over' && event.winner === 'ball')).toBe(true);
+    expect(engine.alivePlayers()).toHaveLength(0);
+    expect(engine.ui().winner).toBe('ball');
+    expect(engine.finished).toBe(true);
     expect(engine.step(16)).toEqual([]);
   });
 
@@ -174,7 +186,6 @@ describe('GameEngine (diez jugadores)', () => {
     const calm = new GameEngine({
       random: () => 0.25,
       servePauseMs: 0,
-      crowd: false,
       survivalMs: Number.POSITIVE_INFINITY,
     });
     calm.forceServe(0, BALL_SPEED);
@@ -189,7 +200,6 @@ describe('GameEngine (diez jugadores)', () => {
     const speeding = new GameEngine({
       random: () => 0.25,
       servePauseMs: 0,
-      crowd: false,
       survivalMs: Number.POSITIVE_INFINITY,
     });
     speeding.forceServe(0, BALL_SPEED);
@@ -246,7 +256,6 @@ describe('GameEngine (diez jugadores)', () => {
       const skewy = new GameEngine({
         servePauseMs: 0,
         random,
-        crowd: false,
         survivalMs: Number.POSITIVE_INFINITY,
       });
       for (const player of PLAYERS) skewy.moveRunnerTo(player, PARK);
@@ -311,7 +320,6 @@ describe('GameEngine (diez jugadores)', () => {
       const run = new GameEngine({
         random: () => 0.25,
         servePauseMs: 0,
-        crowd: false,
         survivalMs: Number.POSITIVE_INFINITY,
       });
       // 400 ms: la bola vuela y rebota, pero todavia no toca a nadie.
@@ -329,90 +337,15 @@ describe('GameEngine (diez jugadores)', () => {
 });
 
 /**
- * La grilla antiagolpamiento: cuatro o mas vivos sosteniendose en la misma
- * celda la revientan y mueren todos. Aqui la regla va encendida (default) y la
- * bola se aparta del rincon de la prueba, asi que las unicas muertes que se
- * cuentan son las de la celda.
- */
-describe('grilla antiagolpamiento', () => {
-  /** Rincon de la mesa lejos del vuelo del saque con `random` fijo. */
-  const CROWD = { x: 60, y: 60 };
-
-  const stepFor = (engine: GameEngine, ms: number): GameEvent[] => {
-    const events: GameEvent[] = [];
-    for (let elapsed = 0; elapsed < ms; elapsed += 16) events.push(...engine.step(16));
-    return events;
-  };
-
-  const crowdKills = (events: GameEvent[]): GameEvent[] =>
-    events.filter((event) => event.type === 'kill' && event.cause === 'crowd');
-
-  const place = (engine: GameEngine, players: readonly Player[], at = CROWD): void => {
-    for (const player of players) engine.moveRunnerTo(player, at);
-  };
-
-  it('menos de cuatro en una celda no matan', () => {
-    const engine = new GameEngine({ random: () => 0.25, servePauseMs: 0 });
-    place(engine, ['rojo', 'naranja', 'amarillo']);
-    const events = stepFor(engine, 1600);
-    expect(crowdKills(events)).toHaveLength(0);
-    expect(engine.isAlive('rojo')).toBe(true);
-  });
-
-  it('cuatro sosteniendose en una celda mueren por aglomeracion', () => {
-    const engine = new GameEngine({ random: () => 0.25, servePauseMs: 0 });
-    const doomed: Player[] = ['rojo', 'naranja', 'amarillo', 'lima'];
-    place(engine, doomed);
-    const events = stepFor(engine, 1600);
-
-    expect(crowdKills(events)).toHaveLength(4);
-    for (const player of doomed) expect(engine.isAlive(player)).toBe(false);
-    expect(engine.ui().crowdKills).toBe(4);
-  });
-
-  it('un apinon de paso no mata: la aglomeracion tiene que sostenerse', () => {
-    const engine = new GameEngine({ random: () => 0.25, servePauseMs: 0 });
-    const group: Player[] = ['rojo', 'naranja', 'amarillo', 'lima'];
-    place(engine, group);
-    stepFor(engine, 500);
-    // Uno se va antes de agotar las revisiones: la celda vuelve a estar en regla.
-    engine.moveRunnerTo('lima', { x: 40, y: 680 });
-    const events = stepFor(engine, 1600);
-    expect(crowdKills(events)).toHaveLength(0);
-  });
-
-  it('si la grilla vacia la mesa, la ronda acaba sin ganador', () => {
-    const engine = new GameEngine({ random: () => 0.25, servePauseMs: 0 });
-    place(engine, PLAYERS);
-    const events = stepFor(engine, 1600);
-
-    expect(crowdKills(events)).toHaveLength(PLAYERS.length);
-    expect(engine.alivePlayers()).toHaveLength(0);
-    expect(engine.ui().winner).toBeNull();
-    expect(engine.ui().draw).toBe(true);
-    expect(engine.finished).toBe(true);
-    expect(events.some((event) => event.type === 'game-over' && event.winner === null)).toBe(true);
-    // Una ronda terminada no avanza mas.
-    expect(engine.step(16)).toEqual([]);
-
-    engine.reset();
-    expect(engine.finished).toBe(false);
-    expect(engine.ui().draw).toBe(false);
-    expect(engine.alivePlayers()).toHaveLength(PLAYERS.length);
-  });
-});
-
-/**
- * La meta colectiva: si la ronda llega al tiempo de supervivencia con alguien
- * vivo, reviven los muertos y ganan todos. Aqui se usa un tiempo corto para no
+ * El minuto: si la ronda llega al tiempo de supervivencia con alguien vivo,
+ * reviven los muertos y ganan las bolitas. Aqui se usa un tiempo corto para no
  * simular el minuto entero; el reloj es el mismo que corre en produccion.
  */
-describe('tregua colectiva', () => {
-  it('pasado el minuto con alguien vivo, reviven los muertos y ganan todos', () => {
+describe('ganan las bolitas al minuto', () => {
+  it('pasado el minuto con alguien vivo, reviven los muertos y ganan las bolitas', () => {
     const engine = new GameEngine({
       random: () => 0.25,
       servePauseMs: 0,
-      crowd: false,
       survivalMs: 100,
     });
     parkOthers(engine, VICTIM);
@@ -422,18 +355,16 @@ describe('tregua colectiva', () => {
     const events: GameEvent[] = [];
     for (let elapsed = 0; elapsed < 400; elapsed += 16) events.push(...engine.step(16));
 
-    // Primero cae el que estaba en el centro; despues llega la tregua.
+    // Primero cae el que estaba en el centro; despues se cumple el minuto.
     const killedAt = events.findIndex((event) => event.type === 'kill' && event.player === VICTIM);
-    const truceAt = events.findIndex((event) => event.type === 'truce');
+    const overAt = events.findIndex((event) => event.type === 'over' && event.winner === 'players');
     expect(killedAt).toBeGreaterThanOrEqual(0);
-    expect(truceAt).toBeGreaterThan(killedAt);
+    expect(overAt).toBeGreaterThan(killedAt);
 
-    // La tregua revive a los caidos: no gana uno, la mesa esta entera otra vez.
+    // Ganan las bolitas y reviven los caidos: la mesa esta entera otra vez.
     expect(engine.isAlive(VICTIM)).toBe(true);
     expect(engine.alivePlayers()).toHaveLength(PLAYERS.length);
-    expect(engine.ui().truce).toBe(true);
-    expect(engine.ui().winner).toBeNull();
-    expect(engine.ui().draw).toBe(false);
+    expect(engine.ui().winner).toBe('players');
     expect(engine.finished).toBe(true);
     expect(engine.step(16)).toEqual([]);
   });

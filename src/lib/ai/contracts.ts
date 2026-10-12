@@ -28,11 +28,6 @@ const playerSnapshotSchema = z.object({
   threatMs: z.number().nonnegative().nullable(),
   threatX: z.number().nullable(),
   threatY: z.number().nullable(),
-  cell: z.object({
-    col: z.number().int().nonnegative(),
-    row: z.number().int().nonnegative(),
-  }),
-  cellCount: z.number().int().nonnegative(),
   alive: z.boolean(),
 });
 
@@ -55,19 +50,10 @@ export const snapshotSchema = z.object({
   dangerRadius: z.number().positive(),
   field: z.object({ min: z.number(), max: z.number() }),
   ballField: z.object({ min: z.number(), max: z.number() }),
-  grid: z.object({
-    cell: z.number().positive(),
-    cols: z.number().int().positive(),
-    rows: z.number().int().positive(),
-    limit: z.number().int().positive(),
-    strikes: z.number().int().positive(),
-    checkMs: z.number().positive(),
-  }),
   runnerSpeed: z.number().nonnegative(),
   survivalMs: z.number().nonnegative(),
   clockMs: z.number().nonnegative(),
   paused: z.boolean(),
-  winner: playerSchema.nullable(),
 });
 
 export const decisionRequestSchema = z.object({
@@ -142,19 +128,14 @@ export interface ErrorResponse {
  * el muestreo de posiciones— para poder analizarla despues. Cada documento
  * tiene `matchId` propio, asi que dos partidas nunca se confunden.
  */
-export const matchOutcomeSchema = z.enum(['winner', 'draw', 'truce']);
+/** Quien gano la ronda: la bola negra o las bolitas. Nunca hay tregua. */
+export const matchOutcomeSchema = z.enum(['ball', 'players']);
 
 /** Posicion de un corredor en un instante muestreado. */
 export const matchSamplePlayerSchema = z.object({
   x: z.number(),
   y: z.number(),
   alive: z.boolean(),
-  cell: z.object({
-    col: z.number().int().nonnegative(),
-    row: z.number().int().nonnegative(),
-  }),
-  /** Cuantos vivos comparten su celda en ese instante. */
-  cellCount: z.number().int().nonnegative(),
 });
 
 const matchSamplePlayersShape = Object.fromEntries(
@@ -182,13 +163,13 @@ export const matchDecisionSchema = z.object({
 /** Un evento del motor con el reloj de ronda en que ocurrio. */
 export const matchEventSchema = z.object({
   clockMs: z.number().nonnegative(),
-  type: z.enum(['wall', 'kill', 'death', 'serve', 'game-over', 'truce']),
+  type: z.enum(['wall', 'kill', 'death', 'serve', 'over']),
   player: playerSchema.optional(),
   x: z.number().optional(),
   y: z.number().optional(),
-  cause: z.enum(['ball', 'crowd']).optional(),
   toward: playerSchema.optional(),
-  winner: playerSchema.nullable().optional(),
+  /** Solo en `over`: quien gano (`ball` o `players`). */
+  winner: matchOutcomeSchema.optional(),
 });
 
 /** La configuracion con la que se jugo: sin esto el analisis no es comparable. */
@@ -200,14 +181,6 @@ export const matchConfigSchema = z.object({
   killRadius: z.number(),
   dangerRadius: z.number(),
   survivalMs: z.number().nonnegative(),
-  grid: z.object({
-    cols: z.number().int().positive(),
-    rows: z.number().int().positive(),
-    cell: z.number().positive(),
-    limit: z.number().int().positive(),
-    strikes: z.number().int().positive(),
-    checkMs: z.number().positive(),
-  }),
 });
 
 /** El desenlace y los contadores finales de la ronda. */
@@ -215,16 +188,14 @@ export const matchResultSchema = z.object({
   clockMs: z.number().nonnegative(),
   /** Meta de tiempo de la ronda (el minuto). Queda explicita para el analisis. */
   survivalMs: z.number().positive(),
-  /** `true` si la ronda llego al minuto: la unica forma de guardarse. */
+  /** `true` si la ronda llego al minuto. */
   reachedMinute: z.boolean(),
   decisions: z.number().int().nonnegative(),
   avgLatencyMs: z.number().nonnegative().nullable(),
   bounces: z.number().int().nonnegative(),
   kills: z.number().int().nonnegative(),
-  /** De esas muertes, cuantas fueron por aglomeracion en una celda. */
-  crowdKills: z.number().int().nonnegative(),
   aliveCount: z.number().int().nonnegative(),
-  /** Colores vivos al cerrar: 1 con ganador, 0 en empate, 10 en tregua. */
+  /** Colores vivos al cerrar: 0 si la bola los mato a todos, 10 en tregua. */
   alive: z.array(playerSchema),
 });
 
@@ -233,10 +204,8 @@ export const matchDocumentSchema = z.object({
   matchId: z.string().min(1).max(120),
   /** Numero de ronda desde que se abrio la pestana. */
   round: z.number().int().positive(),
-  /** Como acabo: gano uno, se la llevo la grilla o hubo tregua colectiva. */
+  /** Como acabo: la bola los mato a todos (`draw`) o hubo tregua (`truce`). */
   outcome: matchOutcomeSchema,
-  /** Ganador individual; `null` en empate y en tregua. */
-  winner: playerSchema.nullable(),
   /** Modelo que estaba decidiendo cuando cerro la ronda. */
   model: z.string().trim().min(1).max(120),
   config: matchConfigSchema,
@@ -282,11 +251,11 @@ export type ModelCall = z.infer<typeof modelCallSchema>;
 export type MatchDocument = z.infer<typeof matchDocumentSchema>;
 
 /**
- * Una partida solo se guarda si llego al minuto. Las que terminan antes (gano
- * uno, o la grilla vacio la mesa) no son completas y se descartan.
+ * Una partida "completa" es la que llego al minuto (las bolitas aguantaron y
+ * ganaron). La bola negra ganando a tiempo no cuenta como completa.
  */
 export const isCompleteMatch = (match: Pick<MatchDocument, 'outcome'>): boolean =>
-  match.outcome === 'truce';
+  match.outcome === 'players';
 export type MatchSample = z.infer<typeof matchSampleSchema>;
 export type MatchDecision = z.infer<typeof matchDecisionSchema>;
 export type MatchEventRecord = z.infer<typeof matchEventSchema>;

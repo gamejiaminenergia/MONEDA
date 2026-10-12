@@ -106,7 +106,6 @@ export interface MatchSummary {
   matchId: string;
   round: number;
   outcome: MatchDocument['outcome'];
-  winner: MatchDocument['winner'];
   model: string;
   config: MatchDocument['config'];
   result: MatchDocument['result'];
@@ -130,7 +129,6 @@ export async function saveMatch(record: MatchDocument, modelCalls: ModelCall[]):
       matchId: record.matchId,
       round: record.round,
       outcome: record.outcome,
-      model: record.model,
       clockMs: Math.round(record.result.clockMs),
       samples: record.samples.length,
       decisions: record.decisions.length,

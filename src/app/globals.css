@@ -807,14 +807,14 @@ kbd {
   text-shadow: 0 0 30px color-mix(in srgb, var(--team) 45%, transparent);
 }
 
-/* Fin sin ganador: la grilla se llevo a todos. Sin color de equipo, rojo. */
-.ovtitle-draw {
+/* Gana la bola negra: mato a los diez. Sin color de equipo, rojo. */
+.ovtitle-ball {
   color: var(--red);
   text-shadow: 0 0 30px color-mix(in srgb, var(--red) 45%, transparent);
 }
 
-/* Tregua: aguantaron el minuto y ganan todos. Verde, sin color de equipo. */
-.ovtitle-truce {
+/* Ganan las bolitas: aguantaron el minuto. Verde, sin color de equipo. */
+.ovtitle-players {
   color: var(--green);
   text-shadow: 0 0 30px color-mix(in srgb, var(--green) 45%, transparent);
 }

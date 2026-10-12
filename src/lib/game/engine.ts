@@ -3,13 +3,7 @@ import {
   BALL_SPEED,
   BOUNCE_SKEW_MAX,
   BOUNCE_SKEW_MIN,
-  CROWD_CHECK_MS,
-  CROWD_LIMIT,
-  CROWD_STRIKES,
   DANGER_R,
-  GRID_CELL,
-  GRID_COLS,
-  GRID_ROWS,
   KILL_R,
   MAX_BALL_SPEED,
   MIN_BALL_SPEED,
@@ -20,7 +14,6 @@ import {
   SURVIVAL_MS,
   W,
 } from './constants';
-import { cellCounts, cellIndex, cellIndexOf, cellOf } from './grid';
 import { MOVE_VEC, compassOf, type Move } from './moves';
 import { clampPlay, distance, predictThreat, segmentHitsCircle } from './physics';
 import { PLAYERS, PLAYER_SPAWN, type Player } from './players';
@@ -28,14 +21,13 @@ import type {
   BallState,
   GameEvent,
   GameSnapshot,
-  GridView,
-  KillCause,
   Point,
   RunnerState,
   PlayerDecision,
   PlayerRecord,
   PlayerSnapshot,
   PlayerUiState,
+  Side,
   UiState,
 } from './types';
 import { ArenaWorld } from './world';
@@ -47,14 +39,8 @@ export interface EngineOptions {
   bounceSkew?: number;
   runnerSpeed?: number;
   /**
-   * Regla de la grilla: cuatro o mas en una celda, sostenido, los mata.
-   * Encendida siempre en la app; los tests que aíslan otros mecanismos la
-   * apagan para no morir por aglomeracion sin querer.
-   */
-  crowd?: boolean;
-  /**
    * Tiempo de ronda para la tregua colectiva, en ms. `Infinity` la apaga (los
-   * tests que miden el juego clasico de eliminacion lo usan asi).
+   * tests que aíslan la eliminacion por la bola lo usan asi).
    */
   survivalMs?: number;
   /** Inyectable para tests deterministas. */
@@ -66,7 +52,6 @@ interface ResolvedOptions {
   ballSpeed: number;
   bounceSkew: number;
   runnerSpeed: number;
-  crowd: boolean;
   survivalMs: number;
   random: () => number;
 }
@@ -80,18 +65,16 @@ const emptyPlayers = <T>(value: (player: Player) => T): PlayerRecord<T> =>
   Object.fromEntries(PLAYERS.map((player) => [player, value(player)] as const)) as PlayerRecord<T>;
 
 /**
- * Reglas del juego: diez jugadores con nombre de color, una bola que rebota
- * para siempre y un unico final — el ultimo jugador vivo. No hay vidas ni
- * segundo intento: un roce basta.
+ * Reglas del juego: diez jugadores con nombre de color contra una bola que
+ * rebota para siempre. No hay vidas ni segundo intento: un roce basta.
+ *
+ * La ronda dura un minuto y siempre acaba con un ganador: la bola negra si
+ * mata a los diez, o las bolitas de colores si al minuto queda alguien vivo
+ * (reviven los muertos). No hay tregua ni empate, y los jugadores no se matan
+ * entre si: el unico enemigo es la bola.
  *
  * La fisica de la bola vive en `ArenaWorld`; aqui estan los jugadores, el roce
- * mortal, la grilla antiagolpamiento y el saque. La velocidad de la bola no
- * cambia durante la ronda.
- *
- * Hay dos formas de morir: que la bola te roce, o apinarte. La mesa esta
- * partida en celdas del tamano de un cuerpo y cuatro o mas corredores
- * sosteniendose en la misma celda mueren todos (ver `checkCrowd`). Esa es la
- * regla que impide que la partida se resuelva escondiendose en un rincon.
+ * mortal y el saque. La velocidad de la bola no cambia durante la ronda.
  */
 export class GameEngine {
   private readonly options: ResolvedOptions;
@@ -110,24 +93,16 @@ export class GameEngine {
   private serveDelayMs = 0;
   private clockMs = 0;
 
-  /** Revisiones consecutivas que cada celda lleva sobre el limite. */
-  private crowdStrikes: number[] = new Array<number>(GRID_COLS * GRID_ROWS).fill(0);
-  private crowdTimerMs = 0;
-
   private bounces = 0;
   private kills = 0;
-  private crowdKills = 0;
   private decisions = 0;
   private latencySumMs = 0;
   private lastLatencyMs: number | null = null;
 
   private paused = false;
   private thinking = false;
-  private winner: Player | null = null;
-  /** La ronda acabo con la mesa vacia: nadie sobrevivio a la grilla. */
-  private drawn = false;
-  /** Se aguanto el minuto: tregua, reviven los muertos y ganan todos. */
-  private truce = false;
+  /** Quien gano la ronda (`ball` o `players`); `null` mientras corre. */
+  private winner: Side | null = null;
 
   private version = 0;
   private cachedUi: UiState | null = null;
@@ -139,7 +114,6 @@ export class GameEngine {
       ballSpeed: options.ballSpeed ?? BALL_SPEED,
       bounceSkew: options.bounceSkew ?? BOUNCE_SKEW_MAX,
       runnerSpeed: options.runnerSpeed ?? RUNNER_SPEED,
-      crowd: options.crowd ?? true,
       survivalMs: options.survivalMs ?? SURVIVAL_MS,
       random: options.random ?? Math.random,
     };
@@ -166,7 +140,7 @@ export class GameEngine {
   }
 
   get finished(): boolean {
-    return this.winner !== null || this.drawn || this.truce;
+    return this.winner !== null;
   }
 
   /** Limites del CENTRO de un jugador. El marco nunca se mueve. */
@@ -232,17 +206,12 @@ export class GameEngine {
     this.world = new ArenaWorld();
     this.ballSpeed = this.options.ballSpeed;
     this.alive = emptyPlayers(() => true);
-    this.crowdStrikes = new Array<number>(GRID_COLS * GRID_ROWS).fill(0);
-    this.crowdTimerMs = 0;
     this.bounces = 0;
     this.kills = 0;
-    this.crowdKills = 0;
     this.decisions = 0;
     this.latencySumMs = 0;
     this.lastLatencyMs = null;
     this.winner = null;
-    this.drawn = false;
-    this.truce = false;
     this.paused = false;
     this.thinking = false;
     this.clockMs = 0;
@@ -331,12 +300,11 @@ export class GameEngine {
       const struck = this.alivePlayers().filter((player) =>
         segmentHitsCircle(sweep.from, sweep.to, this.runners[player], KILL_R),
       );
-      for (const player of struck) this.slay(player, 'ball', events);
+      for (const player of struck) this.slay(player, events);
       if (struck.length > 0) this.afterDeaths(events);
     }
 
-    if (!this.finished) this.checkCrowd(dtMs, events);
-    if (!this.finished && this.clockMs >= this.options.survivalMs) this.declareTruce(events);
+    if (!this.finished && this.clockMs >= this.options.survivalMs) this.endRound('players', events);
 
     if (events.length > 0) this.touch();
     return events;
@@ -366,14 +334,13 @@ export class GameEngine {
     runner.y = clampPlay(runner.y + vector.y * step, min, max);
   }
 
-  /** Saca a un corredor de la ronda: muere sin segunda oportunidad. */
-  private slay(player: Player, cause: KillCause, events: GameEvent[]): void {
+  /** Saca a un corredor de la ronda: la bola lo toco, no hay segunda. */
+  private slay(player: Player, events: GameEvent[]): void {
     const runner = this.runners[player];
     this.alive[player] = false;
     this.lastDecision[player] = null;
     this.kills += 1;
-    if (cause === 'crowd') this.crowdKills += 1;
-    events.push({ type: 'kill', player, x: runner.x, y: runner.y, cause });
+    events.push({ type: 'kill', player, x: runner.x, y: runner.y });
     events.push({ type: 'death', player });
   }
 
@@ -381,71 +348,31 @@ export class GameEngine {
    * Cierra la tanda de muertes.
    *
    * Una muerte no toca la velocidad ni la mesa: la bola es igual de rapida para
-   * todos los que quedan y el marco no se mueve nunca. Si queda mas de uno, se
-   * saca de nuevo; si queda uno, gana; y si la grilla vacio la mesa, la ronda
-   * acaba sin ganador (un empate) en vez de quedarse girando sin jugadores.
+   * todos los que quedan y el marco no se mueve nunca. Mientras quede alguien
+   * vivo, se saca de nuevo y la ronda sigue —aunque quede uno solo—: el unico
+   * final que no es el minuto es que la bola los mate a todos, y ahi gana ella.
    */
   private afterDeaths(events: GameEvent[]): void {
-    const remaining = this.alivePlayers();
-    if (remaining.length > 1) {
+    if (this.alivePlayers().length > 0) {
       this.serve();
       return;
     }
-    this.winner = remaining[0] ?? null;
-    this.drawn = this.winner === null;
-    events.push({ type: 'game-over', winner: this.winner });
+    this.endRound('ball', events);
   }
 
   /**
-   * La regla de la grilla.
-   *
-   * Cada `CROWD_CHECK_MS` se cuenta cuantos vivos hay por celda. Una celda que
-   * lleva `CROWD_STRIKES` revisiones seguidas por encima de `CROWD_LIMIT`
-   * revienta: mueren todos los que estan dentro. La aglomeracion tiene que
-   * sostenerse —un cruce de paso no mata— y el modelo lo sabe porque el prompt
-   * lleva la regla y la celda de cada jugador.
+   * Cierra la ronda con un ganador. La bola gana si mato a los diez; las
+   * bolitas ganan si aguantaron el minuto, y ahi reviven los muertos (vuelven
+   * al punto donde cayeron, que es donde el renderer los hace aparecer). El
+   * reloj no lo salta nadie: el saque de una muerte no lo reinicia.
    */
-  private checkCrowd(dtMs: number, events: GameEvent[]): void {
-    if (!this.options.crowd) return;
-
-    this.crowdTimerMs += dtMs;
-    if (this.crowdTimerMs < CROWD_CHECK_MS) return;
-    this.crowdTimerMs = 0;
-
-    const alive = this.alivePlayers();
-    const counts = cellCounts(alive.map((player) => this.runners[player]));
-
-    for (let index = 0; index < counts.length; index += 1) {
-      if ((counts[index] ?? 0) > CROWD_LIMIT) {
-        this.crowdStrikes[index] = (this.crowdStrikes[index] ?? 0) + 1;
-      } else {
-        this.crowdStrikes[index] = 0;
-      }
+  private endRound(winner: Side, events: GameEvent[]): void {
+    if (winner === 'players') {
+      if (this.alivePlayers().length === 0) return;
+      for (const player of PLAYERS) this.alive[player] = true;
     }
-
-    const doomed = alive.filter(
-      (player) => (this.crowdStrikes[cellIndexOf(this.runners[player])] ?? 0) >= CROWD_STRIKES,
-    );
-    if (doomed.length === 0) return;
-
-    this.crowdStrikes.fill(0);
-    for (const player of doomed) this.slay(player, 'crowd', events);
-    this.afterDeaths(events);
-  }
-
-  /**
-   * La tregua: la ronda aguanto el minuto con al menos un vivo.
-   *
-   * No gana uno: reviven todos los que murieron (vuelven al punto donde
-   * cayeron, que es donde el renderer los hace aparecer) y la ronda es de
-   * todos. Es el cierre opuesto a la grilla: contra apinarse, contra morir
-   * solo. El reloj no lo salta nadie: el saque de una muerte no lo reinicia.
-   */
-  private declareTruce(events: GameEvent[]): void {
-    if (this.alivePlayers().length === 0) return;
-    for (const player of PLAYERS) this.alive[player] = true;
-    this.truce = true;
-    events.push({ type: 'truce' });
+    this.winner = winner;
+    events.push({ type: 'over', winner });
   }
 
   /* ------------------------------- decisiones ----------------------------- */
@@ -479,11 +406,9 @@ export class GameEngine {
 
   snapshot(): GameSnapshot {
     const threats = this.threats();
-    const counts = cellCounts(this.alivePlayers().map((player) => this.runners[player]));
     const players = emptyPlayers<PlayerSnapshot>((player) => {
       const runner = this.runners[player];
       const threat = threats[player];
-      const cell = cellOf(runner);
       return {
         x: Math.round(runner.x),
         y: Math.round(runner.y),
@@ -491,8 +416,6 @@ export class GameEngine {
         threatMs: threat.ms,
         threatX: threat.point ? Math.round(threat.point.x) : null,
         threatY: threat.point ? Math.round(threat.point.y) : null,
-        cell,
-        cellCount: counts[cellIndex(cell.col, cell.row)] ?? 0,
         alive: this.alive[player],
       };
     });
@@ -513,19 +436,10 @@ export class GameEngine {
       dangerRadius: DANGER_R,
       field,
       ballField,
-      grid: {
-        cell: GRID_CELL,
-        cols: GRID_COLS,
-        rows: GRID_ROWS,
-        limit: CROWD_LIMIT,
-        strikes: CROWD_STRIKES,
-        checkMs: CROWD_CHECK_MS,
-      },
       runnerSpeed: this.options.runnerSpeed,
       survivalMs: this.options.survivalMs,
       clockMs: Math.round(this.clockMs),
       paused: this.paused,
-      winner: this.winner,
     };
   }
 
@@ -536,15 +450,12 @@ export class GameEngine {
     alive: PlayerRecord<boolean>;
     serveDelayMs: number;
     pad: number;
-    winner: Player | null;
-    draw: boolean;
-    truce: boolean;
+    /** Ganador de la ronda (`ball` o `players`); `null` mientras corre. */
+    winner: Side | null;
     paused: boolean;
     /** Reloj de ronda en ms: lo usa la telemetria para fechar cada muestra. */
     clockMs: number;
-    grid: GridView;
   } {
-    const counts = cellCounts(this.alivePlayers().map((player) => this.runners[player]));
     return {
       ball: this.ball,
       runners: this.runners,
@@ -552,17 +463,8 @@ export class GameEngine {
       serveDelayMs: this.serveDelayMs,
       pad: PAD,
       winner: this.winner,
-      draw: this.drawn,
-      truce: this.truce,
       paused: this.paused,
       clockMs: Math.round(this.clockMs),
-      grid: {
-        cell: GRID_CELL,
-        cols: GRID_COLS,
-        rows: GRID_ROWS,
-        limit: CROWD_LIMIT,
-        counts,
-      },
     };
   }
 
@@ -588,8 +490,6 @@ export class GameEngine {
       version: this.version,
       players,
       winner: this.winner,
-      draw: this.drawn,
-      truce: this.truce,
       paused: this.paused,
       thinking: this.thinking,
       aliveCount: this.alivePlayers().length,
@@ -598,7 +498,6 @@ export class GameEngine {
       lastLatencyMs: this.lastLatencyMs,
       bounces: this.bounces,
       kills: this.kills,
-      crowdKills: this.crowdKills,
       clockMs: Math.round(this.clockMs),
       ballSpeed: Math.round(this.ballSpeed),
     };

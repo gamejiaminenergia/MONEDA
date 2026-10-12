@@ -14,7 +14,7 @@ import { useGameSettings } from '@/hooks/useGameSettings';
 import { useModelStats } from '@/hooks/useModelStats';
 import { useTheme } from '@/hooks/useTheme';
 import { useTrace } from '@/hooks/useTrace';
-import type { DecisionResponse } from '@/lib/ai/contracts';
+import type { DecisionResponse, MatchDocument } from '@/lib/ai/contracts';
 import { createBoard, type BoardHandle } from '@/lib/client/board/board';
 import { DecisionLoop } from '@/lib/client/decision-loop';
 import { MatchRecorder, SAMPLE_MS } from '@/lib/client/match-recorder';
@@ -23,7 +23,7 @@ import { defaultSettings } from '@/lib/client/settings';
 import type { Status } from '@/lib/client/ui';
 import { AUTO_RESTART_MS, SURVIVAL_MS } from '@/lib/game/constants';
 import { GameEngine } from '@/lib/game/engine';
-import { PLAYERS, type Player } from '@/lib/game/players';
+import { PLAYERS } from '@/lib/game/players';
 import type { GameEvent, GameSnapshot, PlayerRecord } from '@/lib/game/types';
 
 /** Cuantas peticiones pide la consola cuando esta abierta. */
@@ -251,47 +251,39 @@ export function GameShell() {
       theme: themeRef.current,
       onEvent: (event: GameEvent) => {
         recorder.note(event, engine.view().clockMs);
+        if (event.type !== 'over') return;
 
-        // Tregua: se aguanto el minuto, reviven los muertos y gana la mesa
-        // entera. Es la UNICA partida que se guarda: la ronda completa. Las que
-        // terminan antes (ganador o grilla) se descartan.
-        if (event.type === 'truce') {
+        // Cierra la ronda. Siempre hay un ganador: `players` (aguantaron el
+        // minuto) o `ball` (la bola negra mato a los diez).
+        const outcome: MatchDocument['outcome'] = event.winner;
+
+        if (event.winner === 'players') {
+          // Ganaron las bolitas: el marcador suma a cada color.
           recordSurvival(activeModelRef.current, engine.ui().clockMs);
           setWins((current) =>
             Object.fromEntries(
               PLAYERS.map((player) => [player, current[player] + 1]),
             ) as PlayerRecord<number>,
           );
-          const stats = engine.ui();
-          const document = recorder.finish(
-            {
-              round: roundRef.current,
-              outcome: 'truce',
-              winner: null,
-              model: activeModelRef.current,
-              intervalMs: settingsRef.current.intervalMs,
-              snapshot: engine.snapshot(),
-              stats,
-            },
-            matchIdRef.current,
-          );
-          void submitMatch(document);
-          recorder.reset();
-          // El POST ya tomo las llamadas de Jev: no hay que descartar nada.
-          rotateMatch(false);
-          return;
+        } else {
+          recordSurvival(activeModelRef.current, 0);
         }
 
-        if (event.type !== 'game-over') return;
-        recordSurvival(activeModelRef.current, event.winner === null ? 0 : engine.ui().clockMs);
-        if (event.winner) {
-          const champion: Player = event.winner;
-          setWins((current) => ({ ...current, [champion]: current[champion] + 1 }));
-        }
-        // No llego al minuto: no es una partida completa y no se guarda. Se
-        // sueltan sus llamadas a Jev y se abre la partida siguiente.
+        const document = recorder.finish(
+          {
+            round: roundRef.current,
+            outcome,
+            model: activeModelRef.current,
+            intervalMs: settingsRef.current.intervalMs,
+            snapshot: engine.snapshot(),
+            stats: engine.ui(),
+          },
+          matchIdRef.current,
+        );
+        void submitMatch(document);
         recorder.reset();
-        rotateMatch(true);
+        // El POST ya tomo las llamadas de Jev: no hay que descartar nada.
+        rotateMatch(false);
       },
     }).then((created) => {
       // StrictMode monta dos veces en desarrollo: si este efecto ya se limpio,
@@ -316,15 +308,12 @@ export function GameShell() {
   /* ---------------------------- bucle infinito ---------------------------- */
 
   /**
-   * Al morir el penultimo jugador se canta al ganador y, tras unos segundos,
-   * la ronda siguiente arranca sola. Nadie tiene que pulsar nada: la partida
-   * es un bucle mientras la pestana siga abierta.
+   * Cuando la ronda cierra (ganan las bolitas o gana la bola negra), se canta
+   * el final y, tras unos segundos, arranca sola la siguiente. Nadie tiene que
+   * pulsar nada: la partida es un bucle mientras la pestana siga abierta.
    */
   useEffect(() => {
-    // Fin de ronda con ganador, con la mesa vacia (la grilla se los llevo a
-    // todos) o con tregua (aguantaron el minuto): la ronda siguiente arranca
-    // sola en los tres casos.
-    if (!ui.winner && !ui.draw && !ui.truce) return;
+    if (ui.winner === null) return;
 
     const deadline = performance.now() + AUTO_RESTART_MS;
 
@@ -343,7 +332,7 @@ export function GameShell() {
       window.clearInterval(countdown);
       window.clearTimeout(restartTimer);
     };
-  }, [engine, ui.winner, ui.draw, ui.truce]);
+  }, [engine, ui.winner]);
 
   /* --------------------------- bucle de decisiones ------------------------ */
 
@@ -458,8 +447,6 @@ export function GameShell() {
             thinking={ui.thinking}
             paused={ui.paused}
             winner={ui.winner}
-            draw={ui.draw}
-            truce={ui.truce}
             wins={wins}
             round={round}
             countdownSec={countdownSec ?? Math.ceil(AUTO_RESTART_MS / 1000)}
@@ -482,7 +469,6 @@ export function GameShell() {
             avgLatencyMs={ui.avgLatencyMs}
             bounces={ui.bounces}
             kills={ui.kills}
-            crowdKills={ui.crowdKills}
             aliveCount={aliveCount}
             ballSpeed={ui.ballSpeed}
             clockMs={ui.clockMs}

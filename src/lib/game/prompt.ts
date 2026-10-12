@@ -49,26 +49,21 @@ const label = (player: Player): string => {
   return name.charAt(0).toUpperCase() + name.slice(1);
 };
 
-/** En que celda de la grilla esta y cuantos la comparten. */
-const cellLine = (view: PlayerSnapshot): string =>
-  `celda (${view.cell.col}, ${view.cell.row}) con ${view.cellCount} jugadores`;
-
 /** Como se ve la amenaza de un jugador, en una frase. */
 function threatLine(snapshot: GameSnapshot, player: Player): string {
   const view: PlayerSnapshot = snapshot.players[player];
   const name = label(player);
   const where = `en (${view.x}, ${view.y})`;
-  const cell = cellLine(view);
 
   if (view.threatMs === null) {
-    return `${name} ${where}, de este vuelo la bola no le pilla: aguanta hasta que rebote; ${cell}`;
+    return `${name} ${where}, de este vuelo la bola no le pilla: aguanta hasta que rebote`;
   }
   if (view.threatMs === 0) {
-    return `${name} ${where}, LA BOLA LE ESTA ENCIMA: moverse ya; ${cell}`;
+    return `${name} ${where}, LA BOLA LE ESTA ENCIMA: moverse ya`;
   }
   return (
     `${name} ${where}, la bola le pilla en ${view.threatMs} ms por (${view.threatX}, ${view.threatY}); ` +
-    `ahora esta a ${view.distance} px; ${cell}`
+    `ahora esta a ${view.distance} px`
   );
 }
 
@@ -106,10 +101,11 @@ function relativeLine(snapshot: GameSnapshot, player: Player): string {
  * Vive en el servidor para poder ajustar el prompt sin tocar el cliente.
  *
  * La regla de muerte viaja en cada mensaje: un roce y se acaba, no hay vidas
- * ni segunda oportunidad, y gana el ultimo jugador vivo.
+ * ni segunda oportunidad. Los diez estan del mismo lado, contra la bola; el
+ * objetivo es aguantar el minuto en grupo.
  */
 export function buildStatePrompt(snapshot: GameSnapshot): string {
-  const { ball, field, grid } = snapshot;
+  const { ball, field } = snapshot;
 
   const rules =
     `Mesa cuadrada con diez jugadores, cada uno con nombre de color: ${PLAYERS.join(', ')}. ` +
@@ -118,15 +114,11 @@ export function buildStatePrompt(snapshot: GameSnapshot): string {
     `esta en marcha: de lo que pase despues del proximo muro nadie sabe nada. ` +
     `La bola no acelera sola: va a la velocidad que dice el estado, y la mesa no ` +
     `cambia de tamano. ` +
-    `Si la bola toca a un jugador, ese jugador MUERE en el acto, sin vidas ni segunda oportunidad. ` +
-    `Ademas la mesa esta partida en una GRILLA invisible de ${grid.cols} por ${grid.rows} celdas: ` +
-    `si mas de ${grid.limit} jugadores vivos se juntan en la misma celda y lo sostienen ` +
-    `${grid.strikes} revisiones seguidas (una cada ${grid.checkMs} ms), la celda revienta y ` +
-    `MUEREN todos los que estan dentro. Repartirse mantiene a todos con vida; apinarse en un ` +
-    `rincon los mata. ` +
-    `Ademas hay una META COLECTIVA: si la ronda llega a ${Math.round(snapshot.survivalMs / 1000)} segundos ` +
-    `con al menos un jugador vivo, reviven todos los muertos y GANAN TODOS, no uno. ` +
-    `Gana el ultimo jugador que siga vivo; si la grilla se los lleva a todos, la ronda acaba sin ganador.`;
+    `La bola es el UNICO enemigo: si toca a un jugador, ese jugador MUERE en el acto, ` +
+    `sin vidas ni segunda oportunidad. Los diez estan del mismo lado: no se hacen dano entre si. ` +
+    `El round dura ${Math.round(snapshot.survivalMs / 1000)} segundos y siempre acaba con un ` +
+    `ganador: si al cumplirse queda al menos un jugador vivo, reviven los muertos y GANAN LAS ` +
+    `BOLITAS; si la bola los mata a todos antes, GANA LA BOLA NEGRA. No hay tregua ni empate.`;
 
   const dead = PLAYERS.filter((player) => !snapshot.players[player].alive);
   const deadLine =
@@ -154,9 +146,8 @@ export function buildStatePrompt(snapshot: GameSnapshot): string {
     `${situations}. ` +
     `Posiciones relativas, cada uno respecto de los demas vivos (del mas cercano al mas lejano): ${relatives}. ` +
     'Elige donde poner los pies para el vuelo que se ve, no para el siguiente. ' +
-    'Huye de la linea de la bola y no te metas en una esquina: el punto mas peligroso de la mesa es la esquina. ' +
-    'Y no te apines con los demas: cuatro en la misma celda, sostenido, matan a los cuatro. ' +
-    'Aguantar en grupo hasta el minuto vale mas que quedarse solo: la tregua los salva a todos. ' +
+    'Huye de la linea de la bola y no te dejes acorralar en una esquina. ' +
+    'Aguantar hasta el minuto salva a todos: ayudarse a repartir el espacio vale mas que esconderse solo. ' +
     'Un solo paso por decision, asi que no llegas lejos.'
   );
 }

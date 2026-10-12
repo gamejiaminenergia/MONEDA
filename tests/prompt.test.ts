@@ -5,13 +5,7 @@ import { ALL_MOVES } from '@/lib/game/moves';
 import {
   BALL_MAX,
   BALL_MIN,
-  CROWD_CHECK_MS,
-  CROWD_LIMIT,
-  CROWD_STRIKES,
   DANGER_R,
-  GRID_CELL,
-  GRID_COLS,
-  GRID_ROWS,
   KILL_R,
   PLAY_MAX,
   PLAY_MIN,
@@ -28,8 +22,6 @@ const player = (over: Partial<PlayerSnapshot> = {}): PlayerSnapshot => ({
   threatMs: null,
   threatX: null,
   threatY: null,
-  cell: { col: 3, row: 4 },
-  cellCount: 1,
   alive: true,
   ...over,
 });
@@ -59,28 +51,20 @@ const snapshot = (over: Partial<GameSnapshot> = {}): GameSnapshot => ({
   dangerRadius: DANGER_R,
   field: { min: PLAY_MIN, max: PLAY_MAX },
   ballField: { min: BALL_MIN, max: BALL_MAX },
-  grid: {
-    cell: GRID_CELL,
-    cols: GRID_COLS,
-    rows: GRID_ROWS,
-    limit: CROWD_LIMIT,
-    strikes: CROWD_STRIKES,
-    checkMs: CROWD_CHECK_MS,
-  },
   runnerSpeed: RUNNER_SPEED,
   survivalMs: SURVIVAL_MS,
   clockMs: 4200,
   paused: false,
-  winner: null,
   ...over,
 });
 
 describe('prompt', () => {
-  it('deja claro que un roce mata y que no hay vidas', () => {
+  it('deja claro que un roce mata, que la bola es el unico enemigo y que no hay vidas', () => {
     const text = buildStatePrompt(snapshot());
-    expect(text).toContain('Si la bola toca a un jugador, ese jugador MUERE en el acto');
+    expect(text).toContain('ese jugador MUERE en el acto');
     expect(text).toContain('sin vidas ni segunda oportunidad');
-    expect(text).toContain('Gana el ultimo jugador que siga vivo');
+    expect(text).toContain('La bola es el UNICO enemigo');
+    expect(text).toContain('no se hacen dano entre si');
     expect(text).toContain('no se pierde nunca');
   });
 
@@ -102,13 +86,6 @@ describe('prompt', () => {
     expect(text).toContain('solo se puede planificar el vuelo que esta en marcha');
   });
 
-  it('advierte de la grilla y situa a cada jugador en su celda', () => {
-    const text = buildStatePrompt(snapshot());
-    expect(text).toContain(`GRILLA invisible de ${GRID_COLS} por ${GRID_ROWS} celdas`);
-    expect(text).toContain(`si mas de ${CROWD_LIMIT} jugadores vivos se juntan`);
-    expect(text).toContain('celda (3, 4) con 1 jugadores');
-  });
-
   it('da la posicion relativa de cada uno frente a los demas vivos', () => {
     const text = buildStatePrompt(snapshot());
     expect(text).toContain('Posiciones relativas');
@@ -118,11 +95,12 @@ describe('prompt', () => {
     expect(text).toContain('pegado');
   });
 
-  it('anuncia la meta colectiva: aguantar el minuto hace ganar a todos', () => {
+  it('anuncia el round de un minuto y el ganador segun la bola negra', () => {
     const text = buildStatePrompt(snapshot());
-    expect(text).toContain('META COLECTIVA');
-    expect(text).toContain('reviven todos los muertos y GANAN TODOS');
-    expect(text).toContain(`${Math.round(SURVIVAL_MS / 1000)} segundos`);
+    expect(text).toContain(`El round dura ${Math.round(SURVIVAL_MS / 1000)} segundos`);
+    expect(text).toContain('reviven los muertos y GANAN LAS BOLITAS');
+    expect(text).toContain('GANA LA BOLA NEGRA');
+    expect(text).toContain('No hay tregua ni empate');
   });
 
   it('da las medidas de la mesa y los radios', () => {
