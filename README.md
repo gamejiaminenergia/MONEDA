@@ -511,16 +511,21 @@ Si prefieres HTTPS: `git remote add origin https://github.com/USUARIO/REPO.git`.
 
 ## BOLSA — el mismo motor, ahora como mercado
 
-Este repositorio incluye un segundo juego, **BOLSA**, que refleja lo basico del
-mercado mayorista colombiano (MEM) con el mismo esqueleto que Nimble Pong: motor
-determinista, decisiones de IA por agente y mesa viva. La diferencia es la que
-faltaba en las bolitas: **interaccion por precio**. Seis agentes (hidraulicas y
-termicas) ofertan cada hora, el operador despacha por orden de merito y el precio
-de la ultima unidad despachada lo cobran todos. Ganan si cubren la demanda las
-24 horas; si no, gana la escasez.
+Este repositorio incluye un segundo juego, **BOLSA**, que lleva al tablero lo
+basico del mercado mayorista colombiano (MEM) con el mismo esqueleto que Nimble
+Pong: motor determinista, decisiones de IA por agente y mesa viva. La diferencia
+es la que faltaba en las bolitas: **interaccion por precio**. Es **mensual**:
+**72 meses (2020-2025)** con series reales de XM (demanda, bolsa, escasez, embalse
+y aportes). Ocho generadores ofertan su cartera (hidro, termica, solar, eolica) y
+cuatro comercializadores sirven su demanda con contratos y bolsa; el operador
+despacha por orden de merito y el precio de la ultima unidad despachada lo cobran
+todos. La hidro depende del embalse real, hay **ENFICC/OEF**, **precio de escasez**,
+**reconciliaciones**, **TIE** y **emisiones**, y gana quien termina los 72 meses con
+al menos un generador solvente. La bolsa real se dibuja como referencia.
 
-Se abre en `/bolsa`. Concepto en `docs/bolsa/`, la comparacion con el MEM en
-`docs/bolitas/INFORME-BOLITAS-MEM.md` y las consultas reales en `docs/mem/`.
+Se abre en `/bolsa`. Concepto en `docs/bolsa/` (incluye el plan del MEM completo),
+la comparacion con el MEM en `docs/bolitas/INFORME-BOLITAS-MEM.md`, las consultas
+reales en `docs/mem/` y el exportador de escenario en `docs/mem/scenario.sql`.
 
 ## Licencia
 

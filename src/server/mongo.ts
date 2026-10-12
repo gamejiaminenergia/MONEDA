@@ -186,10 +186,14 @@ export async function getMatch(matchId: string): Promise<SavedMatch | null> {
 export interface SessionDocument {
   sessionId: string;
   model: string;
+  scenario?: string | undefined;
   outcome: 'agentes' | 'escasez';
-  horizonHours: number;
-  hours: unknown;
-  generators: unknown;
+  months: unknown;
+  periods?: unknown;
+  resources: unknown;
+  agents: unknown;
+  embalses: unknown;
+  score?: unknown;
   log: unknown;
 }
 
@@ -206,7 +210,7 @@ export async function saveSession(record: SessionDocument): Promise<string | nul
       id: result.insertedId.toString(),
       sessionId: record.sessionId,
       outcome: record.outcome,
-      horas: Array.isArray(record.hours) ? record.hours.length : 0,
+      meses: Array.isArray(record.months) ? record.months.length : 0,
     });
     return result.insertedId.toString();
   } catch (error) {

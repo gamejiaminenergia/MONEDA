@@ -1,140 +1,190 @@
 import { describe, expect, it } from 'vitest';
 
-import { createGenerators } from '@/lib/bolsa/agents';
-import { dispatch } from '@/lib/bolsa/dispatch';
+import { availabilityFactor, hydroFactor } from '@/lib/bolsa/hydrology';
 import { createMarket, effectiveQuantity, stepMarket } from '@/lib/bolsa/engine';
-import type { AgentId, Generator, MarketState, Offer } from '@/lib/bolsa/types';
+import { dispatch } from '@/lib/bolsa/market';
+import { HISTORICO_SCENARIO, PERIODS, getScenario } from '@/lib/bolsa/scenario';
+import type { Agent, Resource, Scenario } from '@/lib/bolsa/types';
 
-const generator = (id: AgentId): Generator => {
-  const found = createGenerators().find((item) => item.id === id);
-  if (!found) throw new Error(`agente ${id} no existe`);
-  return found;
-};
+const resource = (overrides: Partial<Resource> = {}): Resource => ({
+  id: 'h',
+  name: 'Hidro',
+  type: 'hidro',
+  owner: 'azul',
+  capacityGwh: 1000,
+  cost: 50,
+  enfi: 0,
+  fuel: null,
+  embalse: 'e',
+  emissions: 0,
+  ...overrides,
+});
 
-/** Un mercado de un solo agente para aislar la mecanica. */
-function soloMarket(overrides: Partial<Generator> = {}, horizonHours = 1): MarketState {
-  const market = createMarket({ horizonHours, random: () => 0.5 });
-  const base = generator('azul');
-  market.generators = [{ ...base, inflowMw: 0, ...overrides }];
-  market.demandMw = 100;
-  return market;
+const generator = (overrides: Partial<Agent> = {}): Agent => ({
+  id: 'azul',
+  name: 'Gen',
+  color: '#000',
+  role: 'generador',
+  cash: 0,
+  alive: true,
+  resources: ['h'],
+  lastOffers: {},
+  demandGwh: 0,
+  coverage: 0,
+  contractPrice: 0,
+  tariff: 0,
+  ...overrides,
+});
+
+const comercializador = (overrides: Partial<Agent> = {}): Agent => ({
+  id: 'cian',
+  name: 'Com',
+  color: '#111',
+  role: 'comercializador',
+  cash: 0,
+  alive: true,
+  resources: [],
+  lastOffers: {},
+  demandGwh: 100,
+  coverage: 1,
+  contractPrice: 50,
+  tariff: 100,
+  ...overrides,
+});
+
+function testScenario(overrides: Partial<Scenario> = {}): Scenario {
+  const period = (month: string) => ({ month, demandGwh: 100, bolsaRef: 200, escasez: 800, embalsePct: 1, aportePct: 1 });
+  return {
+    id: 'test',
+    name: 'test',
+    description: '',
+    tieCapacityGwh: 0,
+    tiePrice: 750,
+    carbonPrice: 0,
+    reconciliationPerGwh: 0,
+    oefPenalty: 120,
+    periods: [period('2020-01'), period('2020-02')],
+    resources: [resource()],
+    embalses: [{ id: 'e', name: 'E', region: 'r', river: 'rio' }],
+    agents: [generator(), comercializador()],
+    ...overrides,
+  };
 }
-
-const offer = (price: number, quantityMw: number): Offer => ({ price, quantityMw });
 
 describe('dispatch', () => {
   it('despacha de barata a cara y paga el marginal a todos', () => {
     const result = dispatch(
       [
-        { id: 'azul', offer: offer(100, 100) },
-        { id: 'rojo', offer: offer(300, 100) },
+        { resourceId: 'a', agentId: 'azul', price: 100, quantityGwh: 100 },
+        { resourceId: 'b', agentId: 'rojo', price: 300, quantityGwh: 100 },
       ],
       150,
-      900,
+      { scarcityPrice: 900, tieCapacityGwh: 0, tiePrice: 0 },
     );
     expect(result.marginalPrice).toBe(300);
-    expect(result.servedMw).toBe(150);
-    expect(result.deficitMw).toBe(0);
-    expect(result.dispatched).toHaveLength(2);
-    const rojo = result.dispatched.find((unit) => unit.id === 'rojo');
-    expect(rojo?.quantityMw).toBe(50);
+    expect(result.servedGwh).toBe(150);
+    expect(result.dispatched.find((unit) => unit.resourceId === 'b')?.quantityGwh).toBe(50);
   });
 
-  it('si no alcanza la oferta, el precio salta al de escasez y hay deficit', () => {
-    const result = dispatch([{ id: 'azul', offer: offer(100, 100) }], 300, 900);
+  it('el TIE cubre el deficit antes del racionamiento', () => {
+    const result = dispatch([{ resourceId: 'a', agentId: 'azul', price: 100, quantityGwh: 100 }], 200, {
+      scarcityPrice: 900,
+      tieCapacityGwh: 60,
+      tiePrice: 760,
+    });
+    expect(result.importedGwh).toBe(60);
+    expect(result.deficitGwh).toBe(40);
     expect(result.marginalPrice).toBe(900);
-    expect(result.servedMw).toBe(100);
-    expect(result.deficitMw).toBe(200);
   });
 });
 
-describe('effectiveQuantity', () => {
-  it('una hidraulica no puede ofrecer mas agua de la que tiene', () => {
-    const hidro = { ...generator('azul'), embalseMw: 50 };
-    expect(effectiveQuantity(hidro, offer(100, 200))).toBe(50);
+describe('hidrologia', () => {
+  it('la hidro disponible sigue al embalse y la solar tiene factor de planta', () => {
+    expect(hydroFactor(0.3)).toBeCloseTo(0.3, 5);
+    expect(availabilityFactor(resource(), 0.3)).toBeCloseTo(0.3, 5);
+    expect(availabilityFactor(resource({ type: 'solar' }), 1)).toBeCloseTo(0.25, 5);
+    expect(availabilityFactor(resource({ type: 'termica' }), 1)).toBe(1);
   });
 
-  it('nadie ofrece mas que su capacidad', () => {
-    const termica = generator('rojo');
-    expect(effectiveQuantity(termica, offer(300, 999))).toBe(termica.capacityMw);
+  it('no puede ofrecer mas de lo disponible con el embalse bajo', () => {
+    const market = createMarket(testScenario());
+    market.embalsePct = 0.3;
+    expect(effectiveQuantity(market, market.resources[0]!, { price: 100, quantityGwh: 1000 })).toBeCloseTo(300, 5);
   });
 });
 
 describe('stepMarket', () => {
-  it('liquida la utilidad y gasta el embalse', () => {
-    const market = soloMarket();
-    stepMarket(market, { azul: offer(420, 100) });
-    // (420 - 60) COP/kWh * 100 MWh * 1000 / 1e6 = 36 millones.
-    expect(market.generators[0]?.cash).toBeCloseTo(36, 5);
-    expect(market.generators[0]?.embalseMw).toBeCloseTo(800, 5);
+  it('liquida generador y comercializador', () => {
+    const market = createMarket(testScenario());
+    stepMarket(market, { azul: { h: { price: 420, quantityGwh: 1000 } } });
+    const gen = market.agents.find((agent) => agent.id === 'azul');
+    const com = market.agents.find((agent) => agent.id === 'cian');
+    // Generador: (420 - 50) COP/kWh * 100 GWh = 37.000 millones de COP.
+    expect(gen?.cash).toBeCloseTo(37000, 0);
+    // Comercializador cubierto 100%: (100 - 50) * 100 GWh = 5.000 millones.
+    expect(com?.cash).toBeCloseTo(5000, 0);
     expect(market.marginalPrice).toBe(420);
-    expect(market.priceHistory).toEqual([420]);
+    expect(market.score.monthsServed).toBe(1);
   });
 
-  it('gana la escasez cuando la demanda no se cubre', () => {
-    const market = soloMarket({}, 3);
-    market.demandMw = 300;
-    const events = stepMarket(market, { azul: offer(100, 100) });
-    expect(market.finished).toBe(true);
-    expect(market.winner).toBe('escasez');
-    expect(market.blackouts).toBe(1);
-    expect(events.some((event) => event.type === 'apagon')).toBe(true);
-  });
-
-  it('ganan los agentes si se aguanta todo el horizonte', () => {
-    // Capacidad de sobra para cubrir la demanda de las dos horas (la curva crece).
-    const market = soloMarket({ capacityMw: 700 }, 2);
-    stepMarket(market, { azul: offer(420, 700) });
+  it('cuenta el racionamiento pero no termina la partida', () => {
+    const market = createMarket(testScenario({ resources: [resource({ capacityGwh: 50 })] }));
+    const events = stepMarket(market, { azul: { h: { price: 100, quantityGwh: 50 } } });
+    expect(market.deficitMonths).toBe(1);
+    expect(events.some((event) => event.type === 'deficit')).toBe(true);
     expect(market.finished).toBe(false);
-    const events = stepMarket(market, { azul: offer(420, 700) });
-    expect(market.finished).toBe(true);
+  });
+
+  it('en un mes estresado, quien no entrega su ENFICC paga multa', () => {
+    const market = createMarket(testScenario({ resources: [resource({ enfi: 200 })] }));
+    market.periods[0]!.escasez = 400;
+    market.escasez = 400;
+    stepMarket(market, { azul: { h: { price: 420, quantityGwh: 1000 } } });
+    const gen = market.agents.find((agent) => agent.id === 'azul');
+    // Marginal 420 >= escasez 400 -> estresado. Bruto (420-50)*100 = 37.000;
+    // multa (200-100)*120 = 12.000 -> 25.000.
+    expect(gen?.cash).toBeCloseTo(25000, 0);
+  });
+
+  it('ganan los agentes al terminar los meses con un generador solvente', () => {
+    const market = createMarket(testScenario());
+    stepMarket(market, { azul: { h: { price: 420, quantityGwh: 1000 } } });
+    const events = stepMarket(market, { azul: { h: { price: 420, quantityGwh: 1000 } } });
     expect(market.winner).toBe('agentes');
     expect(events.some((event) => event.type === 'fin' && event.winner === 'agentes')).toBe(true);
   });
 
-  it('saca del mercado al agente que queda insolvente', () => {
-    // Caja ya por debajo del umbral: la siguiente hora lo liquida.
-    const market = soloMarket({ cost: 430, capacityMw: 700 }, 3);
-    market.generators[0]!.cash = -200;
-    const events = stepMarket(market, { azul: offer(420, 100) });
-    expect(events.some((event) => event.type === 'insolvente')).toBe(true);
-    expect(market.generators[0]?.alive).toBe(false);
-    expect(market.winner).toBe('escasez');
-  });
-
-  it('reusa la ultima oferta del agente si el modelo no responde', () => {
-    const market = soloMarket({}, 2);
-    market.generators[0]!.lastOffer = offer(420, 100);
-    stepMarket(market, {}); // sin ofertas nuevas
-    expect(market.marginalPrice).toBe(420);
-    expect(market.generators[0]?.cash).toBeCloseTo(36, 5);
-  });
-
-  it('juega un dia completo y siempre acaba con un ganador', () => {
-    const market = createMarket();
-    const offers: Partial<Record<AgentId, Offer>> = {};
-    for (const generator of market.generators) {
-      offers[generator.id] = offer(generator.kind === 'hidro' ? 230 : 420, generator.capacityMw);
-    }
-    const random = () => 0.6;
+  it('pierde la escasez si todos los generadores caen', () => {
+    const market = createMarket(
+      testScenario({ resources: [resource({ cost: 900, enfi: 0 })], oefPenalty: 0 }),
+    );
     let guard = 0;
-    while (!market.finished && guard < 100) {
-      stepMarket(market, offers, { random });
+    while (!market.finished && guard < 10) {
+      stepMarket(market, { azul: { h: { price: 100, quantityGwh: 1000 } } });
       guard += 1;
     }
     expect(market.finished).toBe(true);
-    expect(['agentes', 'escasez']).toContain(market.winner);
-    expect(market.priceHistory.length).toBeGreaterThan(0);
+    expect(market.winner).toBe('escasez');
+  });
+});
+
+describe('escenario historico', () => {
+  it('trae los 72 meses reales (2020-2025)', () => {
+    expect(PERIODS).toHaveLength(72);
+    expect(PERIODS[0]?.month).toBe('2020-01');
+    expect(PERIODS[71]?.month).toBe('2025-12');
+    expect(getScenario('historico').periods).toHaveLength(72);
+    // El pico real de bolsa fue octubre de 2024.
+    const peak = HISTORICO_SCENARIO.periods.reduce((best, period) => (period.bolsaRef > best.bolsaRef ? period : best));
+    expect(peak.month).toBe('2024-10');
   });
 
-  it('es determinista con el mismo azar', () => {
+  it('es determinista (el clima es exogeno)', () => {
     const run = () => {
-      const market = createMarket({ horizonHours: 3 });
-      const random = () => 0.25;
-      stepMarket(market, {}, { random });
-      stepMarket(market, {}, { random });
-      return market.generators.map((item) => ({ id: item.id, embalse: item.embalseMw, cash: item.cash }));
+      const market = createMarket(HISTORICO_SCENARIO);
+      stepMarket(market, { azul: { guavio: { price: 230, quantityGwh: 1000 } } });
+      return market.marginalPrice;
     };
-    expect(run()).toEqual(run());
+    expect(run()).toBe(run());
   });
 });

@@ -8,7 +8,7 @@ import {
   type BolsaDecisionResponse,
 } from '@/lib/ai/bolsa';
 import type { ErrorResponse } from '@/lib/ai/contracts';
-import { buildAgentQuestions, buildAgentState } from '@/lib/bolsa/prompt';
+import { buildGeneratorQuestions, buildGeneratorState } from '@/lib/bolsa/prompt';
 import type { AgentId, Offer } from '@/lib/bolsa/types';
 import type { QuestionSet } from '@/lib/game/prompt';
 import { elapsedMs, logger } from '@/server/log';
@@ -27,17 +27,15 @@ function fail(error: string, code: ErrorResponse['code'], status: number) {
 /**
  * POST /api/bolsa/decision
  *
- * Recibe el estado del mercado y devuelve la oferta de cada agente vivo. A
- * diferencia de las bolitas, aqui hay **un Jev por agente**: cada uno decide su
- * oferta viendo solo su informacion privada. El navegador nunca habla con
- * TypeSafe ni ve la API key.
+ * Devuelve la oferta de cada generador vivo, recurso por recurso. Hay **un Jev
+ * por generador**: decide toda su cartera viendo solo su informacion privada. El
+ * navegador nunca habla con TypeSafe ni ve la API key.
  */
 export async function POST(request: Request) {
   let body: unknown;
   try {
     body = await request.json();
   } catch {
-    log.warn('cuerpo invalido', { reason: 'no es JSON' });
     return fail('El cuerpo de la peticion no es JSON valido', 'bad-request', 400);
   }
 
@@ -58,8 +56,8 @@ export async function POST(request: Request) {
     return fail('TypeSafe no esta configurado: falta TYPESAFE_API_KEY', 'model-not-configured', 502);
   }
 
-  const alive = market.generators.filter((generator) => generator.alive);
-  if (alive.length === 0) {
+  const generators = market.agents.filter((agent) => agent.role === 'generador' && agent.alive);
+  if (generators.length === 0) {
     return NextResponse.json<BolsaDecisionResponse>({
       model,
       latencyMs: Date.now() - startedAt,
@@ -68,44 +66,44 @@ export async function POST(request: Request) {
     });
   }
 
-  // Las preguntas son las mismas para todos; cambia el estado privado de cada uno.
-  const questions = buildAgentQuestions() as unknown as QuestionSet;
-
   const settled = await Promise.all(
-    alive.map(async (generator) => {
+    generators.map(async (agent) => {
       try {
+        const questions = buildGeneratorQuestions(agent, market) as unknown as QuestionSet;
         const call = await askSystemOne({
           model,
-          state: buildAgentState(market, generator),
+          state: buildGeneratorState(market, agent),
           questions,
           signal: request.signal,
           timeoutMs: config.timeoutMs,
         });
-        const priceAnswer = call.answers.precio;
-        const quantityAnswer = call.answers.cantidad;
-        if (!priceAnswer || !quantityAnswer) {
-          throw new ModelError('model-malformed', `Respuesta incompleta para ${generator.name}`);
+        const offers: Record<string, Offer> = {};
+        for (const resourceId of agent.resources) {
+          const resource = market.resources.find((item) => item.id === resourceId);
+          const priceAnswer = call.answers[`${resourceId}__precio`];
+          const quantityAnswer = call.answers[`${resourceId}__cantidad`];
+          if (!resource || !priceAnswer || !quantityAnswer) continue;
+          offers[resourceId] = offerFromBands(resource, normalizePriceBand(priceAnswer), normalizeQuantityBand(quantityAnswer));
         }
-        const offer = offerFromBands(generator, normalizePriceBand(priceAnswer), normalizeQuantityBand(quantityAnswer));
-        return { id: generator.id, offer, usage: call.usage ?? null, answered: call.model ?? null };
+        if (Object.keys(offers).length === 0) {
+          throw new ModelError('model-malformed', `Sin ofertas para ${agent.name}`);
+        }
+        return { id: agent.id, offers, usage: call.usage ?? null };
       } catch (error) {
-        // Un agente sin respuesta no detiene la hora: el motor reusa su ultima oferta.
-        log.warn('agente sin oferta', {
-          id: generator.id,
-          error: error instanceof Error ? error.message : String(error),
-        });
+        // Un generador sin respuesta no detiene la hora: el motor reusa su ultima oferta.
+        log.warn('generador sin oferta', { id: agent.id, error: error instanceof Error ? error.message : String(error) });
         return null;
       }
     }),
   );
 
-  const offers: Partial<Record<AgentId, Offer>> = {};
+  const offers: Partial<Record<AgentId, Record<string, Offer>>> = {};
   let inputTokens: number | null = 0;
   let outputTokens: number | null = 0;
   let answered = 0;
   for (const item of settled) {
     if (!item) continue;
-    offers[item.id] = item.offer;
+    offers[item.id] = item.offers;
     answered += 1;
     if (item.usage) {
       inputTokens = (inputTokens ?? 0) + (item.usage.input_tokens ?? 0);
@@ -114,17 +112,11 @@ export async function POST(request: Request) {
   }
 
   if (answered === 0) {
-    log.error('ningun agente respondio', { model, ms: elapsedMs(startedAt) });
-    return fail('Ningun agente obtuvo oferta del modelo', 'model-malformed', 502);
+    log.error('ningun generador respondio', { model, ms: elapsedMs(startedAt) });
+    return fail('Ningun generador obtuvo oferta del modelo', 'model-malformed', 502);
   }
 
-  log.info('ofertas', {
-    model,
-    hora: market.hour,
-    agentes: answered,
-    inTokens: inputTokens,
-    ms: elapsedMs(startedAt),
-  });
+  log.info('ofertas', { model, mes: market.monthIndex, generadores: answered, inTokens: inputTokens, ms: elapsedMs(startedAt) });
 
   return NextResponse.json<BolsaDecisionResponse>({
     model,

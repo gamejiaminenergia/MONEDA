@@ -13,10 +13,14 @@ export const dynamic = 'force-dynamic';
 const sessionSchema = z.object({
   sessionId: z.string().trim().min(1).max(120),
   model: z.string().trim().min(1).max(120),
+  scenario: z.string().trim().min(1).max(60).optional(),
   outcome: z.enum(['agentes', 'escasez']),
-  horizonHours: z.number().int().positive(),
-  hours: z.array(z.unknown()).max(500),
-  generators: z.array(z.unknown()).max(24),
+  months: z.array(z.unknown()).max(120),
+  periods: z.array(z.unknown()).max(120).optional(),
+  resources: z.array(z.unknown()).max(64),
+  agents: z.array(z.unknown()).max(32),
+  embalses: z.array(z.unknown()).max(32),
+  score: z.unknown().optional(),
   log: z.array(z.string()).max(500),
 });
 

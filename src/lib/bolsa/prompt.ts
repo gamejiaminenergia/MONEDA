@@ -1,10 +1,10 @@
-import { PRICE_BANDS, QUANTITY_BANDS, SCARCITY_PRICE } from './constants';
-import type { Generator, MarketState } from './types';
+import { PRICE_BANDS, QUANTITY_BANDS } from './constants';
+import { availabilityFactor } from './hydrology';
+import type { Agent, MarketState, Resource } from './types';
 
 /**
- * Prompt de BOLSA: convierte el estado en el texto que recibe el modelo para
- * **un** agente. Cada agente ve su informacion privada (costo, embalse, caja) y
- * del mercado solo lo publico (demanda, sequia, precios, capacidades agregadas).
+ * Prompt de BOLSA (mensual): el texto que recibe el modelo para **un generador**.
+ * Ve su cartera y del mercado solo lo publico (demanda, embalse, precios).
  *
  * Vive fuera del motor: el motor no sabe que existe un modelo.
  */
@@ -19,74 +19,75 @@ export type AgentQuestions = Record<string, AgentQuestionSpec>;
 
 const n = (value: number): number => Math.round(value);
 
-/** Capacidad y agua agregadas del sistema, que si es informacion publica. */
-function publicSummary(state: MarketState): { hydroCapacity: number; thermalCapacity: number; hydroEmbalse: number } {
-  let hydroCapacity = 0;
-  let thermalCapacity = 0;
-  let hydroEmbalse = 0;
-  for (const generator of state.generators) {
-    if (!generator.alive) continue;
-    if (generator.kind === 'hidro') {
-      hydroCapacity += generator.capacityMw;
-      hydroEmbalse += generator.embalseMw;
-    } else {
-      thermalCapacity += generator.capacityMw;
-    }
-  }
-  return { hydroCapacity, thermalCapacity, hydroEmbalse };
-}
+const TYPE_LABEL: Record<Resource['type'], string> = {
+  hidro: 'hidraulica',
+  termica: 'termica',
+  solar: 'solar',
+  eolica: 'eolica',
+};
 
-/** La frase de la regla de juego, igual para todos los agentes. */
-const RULES =
-  'El operador ordena las ofertas de barata a cara y despacha hasta cubrir la demanda. ' +
-  'El precio de la ultima unidad despachada lo reciben TODAS (precio marginal). ' +
-  'Si la oferta no alcanza la demanda hay apagon y pierden todos. ' +
-  'Si tu caja queda muy negativa quedas insolvente y sales del mercado. ' +
-  'Aguantar las 24 horas sin apagon hace ganar a los agentes.';
-
-export function buildAgentState(state: MarketState, generator: Generator): string {
-  const { hydroCapacity, thermalCapacity, hydroEmbalse } = publicSummary(state);
-  const history = state.priceHistory.slice(-4).map(n).join(', ') || 'sin datos aun';
-  const marginal = state.marginalPrice === null ? 'sin dato' : `${n(state.marginalPrice)} COP/kWh`;
-  const water =
-    generator.kind === 'hidro'
-      ? `Central hidraulica. Te quedan ${n(generator.embalseMw)} de ${n(generator.embalseMaxMw)} MWh embalsados y llueve segun la sequia.`
-      : 'Central termica. Tienes combustible de sobra, pero tu costo es alto.';
-
+function resourceLine(state: MarketState, resource: Resource): string {
+  const disponible = Math.round(resource.capacityGwh * availabilityFactor(resource, state.embalsePct));
   return (
-    `Mercado mayorista de energia (BOLSA). Hora ${state.hour} de ${state.horizonHours}. ` +
-    `Demanda prevista de esta hora: ${n(state.demandMw)} MWh. ` +
-    `Sequia ${state.sequia.toFixed(2)} (0 = lluvia normal, 1 = muy seca; seca el embalse). ` +
-    `Precio de escasez: ${SCARCITY_PRICE} COP/kWh. Precio marginal de la hora anterior: ${marginal}. ` +
-    `Ultimos precios marginales: ${history}. ` +
-    `El sistema tiene ${n(hydroCapacity)} MWh de capacidad hidraulica (${n(hydroEmbalse)} MWh embalsados) ` +
-    `y ${n(thermalCapacity)} MWh de capacidad termica. ` +
-    `Tu: ${generator.name}. ${water} Capacidad ${n(generator.capacityMw)} MWh. ` +
-    `Costo variable ${n(generator.cost)} COP/kWh. Caja acumulada ${n(generator.cash)} millones de COP. ` +
-    `${RULES} ` +
-    'Ofrece por encima de tu costo o pierdes dinero; guarda agua si crees que la sequia aprieta. ' +
-    'Tu oferta mueve el precio que cobran todos, no solo tu.'
+    `${resource.name} (${TYPE_LABEL[resource.type]}, disponible ${disponible} GWh este mes de ${n(resource.capacityGwh)} GWh, ` +
+    `costo ${n(resource.cost)} COP/kWh, ENFICC ${n(resource.enfi)} GWh, emisiones ${n(resource.emissions)} kg/MWh)`
   );
 }
 
-/** Dos preguntas tipadas por agente: banda de precio y banda de cantidad. */
-export function buildAgentQuestions(): AgentQuestions {
+export function buildGeneratorState(state: MarketState, agent: Agent): string {
+  const period = state.periods[state.monthIndex];
+  const month = period?.month ?? '—';
+  const history = state.priceHistory.slice(-4).map(n).join(', ') || 'sin datos aun';
+  const marginal = state.marginalPrice === null ? 'sin dato' : `${n(state.marginalPrice)} COP/kWh`;
+  const portfolio =
+    agent.resources.length > 0
+      ? `Tu cartera: ${agent.resources
+          .map((id) => {
+            const resource = state.resources.find((item) => item.id === id);
+            return resource ? resourceLine(state, resource) : id;
+          })
+          .join('; ')}.`
+      : 'No tienes plantas.';
+
+  return (
+    `Mercado mayorista de energia (BOLSA), mes ${month} (${state.monthIndex + 1} de ${state.months}). ` +
+    `Demanda del mes: ${n(state.demandGwh)} GWh. Embalse del sistema al ${(state.embalsePct * 100).toFixed(0)}% ` +
+    `(aporta ${period?.aportePct ?? 1}x la media historica). Precio de escasez del mes: ${n(state.escasez)} COP/kWh. ` +
+    `Precio de bolsa real del mes (referencia): ${n(period?.bolsaRef ?? 0)} COP/kWh. ` +
+    `Precio marginal del mes anterior: ${marginal}. Ultimos precios: ${history}. ` +
+    `El sistema tiene TIE para importar hasta ${n(state.tieCapacityGwh)} GWh a ${n(state.tiePrice)} COP/kWh. ` +
+    `Costo de carbono ${n(state.carbonPrice)} COP/kg. ` +
+    `Eres ${agent.name} (generador). ${portfolio} Caja acumulada ${n(agent.cash)} millones de COP. ` +
+    'El operador ordena las ofertas de barata a cara y despacha hasta cubrir la demanda; el precio de la ultima ' +
+    'unidad lo reciben TODAS. Si no alcanza, entra el TIE; si aun falta, hay racionamiento. En un mes estresado, ' +
+    'quien tenga ENFICC y no la entregue paga multa. Si tu caja queda muy negativa, sales del mercado. ' +
+    'Ganar es terminar los 72 meses con al menos un generador solvente. ' +
+    'Ofrece por encima del costo de cada planta o pierdes dinero; guarda agua si el embalse esta bajo; ' +
+    'tu oferta mueve el precio que cobran todos.'
+  );
+}
+
+export function buildGeneratorQuestions(agent: Agent, state: MarketState): AgentQuestions {
   const priceCriteria: Record<string, string> = {};
   for (const band of PRICE_BANDS) priceCriteria[band.id] = `${n(band.price)} COP/kWh (${band.label})`;
 
   const quantityCriteria: Record<string, string> = {};
   for (const band of QUANTITY_BANDS) quantityCriteria[band.id] = band.label;
 
-  return {
-    precio: {
+  const questions: AgentQuestions = {};
+  for (const resourceId of agent.resources) {
+    const resource = state.resources.find((item) => item.id === resourceId);
+    if (!resource) continue;
+    questions[`${resourceId}__precio`] = {
       type: 'choice',
-      instructions: '¿A que precio ofertas tu energia esta hora? Elige la banda de precio.',
+      instructions: `A que precio ofertas ${resource.name} este mes? Elige la banda de precio.`,
       criteria: priceCriteria,
-    },
-    cantidad: {
+    };
+    questions[`${resourceId}__cantidad`] = {
       type: 'choice',
-      instructions: '¿Cuanta energia ofertas a ese precio, como fraccion de tu capacidad?',
+      instructions: `Cuanta energia ofertas de ${resource.name}, como fraccion de su disponibilidad?`,
       criteria: quantityCriteria,
-    },
-  };
+    };
+  }
+  return questions;
 }

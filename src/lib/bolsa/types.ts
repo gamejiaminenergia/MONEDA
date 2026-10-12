@@ -1,95 +1,175 @@
 /**
- * Tipos del mercado de BOLSA.
+ * Tipos de BOLSA en su version mensual (2020-2025).
  *
- * Modulo puro: sin React, sin `next/*` y sin DOM. El motor corre igual en Node
- * (los tests lo ejercitan sin navegador), como el motor del juego de bolitas.
+ * Un MEM en miniatura con granularidad **mensual**: cada "turno" es un mes y las
+ * series del clima y la demanda vienen del dato real de XM (`elecdb`).
+ *
+ * Modulo puro (sin React, sin `next/*`, sin DOM): el motor corre en Node.
  */
 
-/** Los seis agentes del mercado, identificados por color (como las bolitas). */
-export const AGENT_IDS = ['azul', 'verde', 'turquesa', 'rojo', 'naranja', 'amarillo'] as const;
+export const AGENT_IDS = [
+  'azul',
+  'verde',
+  'turquesa',
+  'rojo',
+  'naranja',
+  'amarillo',
+  'morado',
+  'rosa',
+  'cian',
+  'lima',
+  'violeta',
+  'marron',
+] as const;
 export type AgentId = (typeof AGENT_IDS)[number];
 
-/** Hidro: barata pero gasta embalse. Termica: firme pero cara. */
-export type AgentKind = 'hidro' | 'termica';
+export type ResourceType = 'hidro' | 'termica' | 'solar' | 'eolica';
+export type AgentRole = 'generador' | 'comercializador';
+export type Fuel = 'gas' | 'carbon' | 'acpm';
 
-export interface Generator {
+/** Un mes del horizonte. Las cinco series son el dato real de XM. */
+export interface Period {
+  /** 'YYYY-MM'. */
+  month: string;
+  /** Demanda del SIN del mes, GWh (`DemaSIN`). */
+  demandGwh: number;
+  /** Precio de bolsa real, COP/kWh (`PPPrecBolsNaci`); linea de referencia. */
+  bolsaRef: number;
+  /** Precio de escasez del mes, COP/kWh (`PrecEsca`). */
+  escasez: number;
+  /** Embalse promedio del mes, 0..1 (`PorcVoluUtilDiar`). */
+  embalsePct: number;
+  /** Aportes vs media historica (`PorcApor`); contexto hidrologico. */
+  aportePct: number;
+}
+
+/** Una planta. Espeja `dim_recurso` + `fact_daily_recurso` (agregado a mes). */
+export interface Resource {
+  id: string;
+  name: string;
+  type: ResourceType;
+  owner: AgentId;
+  /** Energia maxima del mes a plena disponibilidad, GWh. */
+  capacityGwh: number;
+  /** Costo variable, COP/kWh. */
+  cost: number;
+  /** Energia firme mensual, GWh (`ENFICC`). */
+  enfi: number;
+  fuel: Fuel | null;
+  /** Embalse que lo alimenta (solo hidro). */
+  embalse: string | null;
+  /** Emisiones, kg CO2 por MWh. */
+  emissions: number;
+}
+
+/** Un embalse (para la ficha y el contexto; el nivel real manda por mes). */
+export interface Embalse {
+  id: string;
+  name: string;
+  region: string;
+  river: string;
+}
+
+export interface Offer {
+  price: number;
+  quantityGwh: number;
+}
+
+export interface Agent {
   id: AgentId;
   name: string;
   color: string;
-  kind: AgentKind;
-  /** Capacidad maxima por hora, en MWh. */
-  capacityMw: number;
-  /** Costo variable, en COP/kWh. */
-  cost: number;
-  /** Energia embalsada disponible (solo hidro), en MWh. */
-  embalseMw: number;
-  /** Techo del embalse (solo hidro), en MWh. */
-  embalseMaxMw: number;
-  /** Lluvia base que recarga el embalse por hora (solo hidro), en MWh. */
-  inflowMw: number;
-  /** Caja acumulada, en millones de COP. */
+  role: AgentRole;
   cash: number;
-  /** Orden vigente; se reusa si el modelo no responde. */
-  lastOffer: Offer;
   alive: boolean;
-}
-
-/** Una oferta por hora: precio (COP/kWh) y cantidad (MWh). */
-export interface Offer {
-  price: number;
-  quantityMw: number;
+  resources: string[];
+  lastOffers: Record<string, Offer>;
+  /** Comercializador: demanda mensual, GWh. */
+  demandGwh: number;
+  coverage: number;
+  contractPrice: number;
+  tariff: number;
 }
 
 export interface DispatchedUnit {
-  id: AgentId;
+  resourceId: string;
+  agentId: AgentId;
   price: number;
-  quantityMw: number;
+  quantityGwh: number;
 }
 
-export interface DispatchResult {
-  /** Precio que reciben todos los despachados (COP/kWh). */
+/** El resultado de un mes, para la torre de merito y las series. */
+export interface MonthRecord {
+  monthIndex: number;
+  month: string;
+  demandGwh: number;
   marginalPrice: number;
+  deficitGwh: number;
+  importedGwh: number;
+  emissionsTon: number;
   dispatched: DispatchedUnit[];
-  servedMw: number;
-  deficitMw: number;
 }
-
-export type MarketEvent =
-  | {
-      hour: number;
-      type: 'hora';
-      demandMw: number;
-      marginalPrice: number;
-      deficitMw: number;
-      dispatched: DispatchedUnit[];
-    }
-  | { hour: number; type: 'apagon'; deficitMw: number }
-  | { hour: number; type: 'insolvente'; id: AgentId }
-  | { hour: number; type: 'fin'; winner: 'agentes' | 'escasez' };
 
 export type MarketWinner = 'agentes' | 'escasez';
 
+export type MarketEvent =
+  | { monthIndex: number; type: 'mes'; record: MonthRecord }
+  | { monthIndex: number; type: 'deficit'; deficitGwh: number }
+  | { monthIndex: number; type: 'insolvente'; id: AgentId; role: AgentRole }
+  | { monthIndex: number; type: 'fin'; winner: MarketWinner };
+
+/** Marcador de la partida: cuantos meses se sirvieron y a que precio. */
+export interface Score {
+  monthsServed: number;
+  deficitMonths: number;
+  avgMarginal: number;
+  avgBolsaRef: number;
+  emissionsTon: number;
+  insolvencies: number;
+}
+
 export interface MarketState {
-  /** Hora actual, 0..horizonHours. */
-  hour: number;
-  horizonHours: number;
-  /** Demanda de la hora en curso, MWh. */
-  demandMw: number;
-  /** Sequia 0..1: seca el embalse. */
-  sequia: number;
-  /** Precio marginal de la ultima hora (null en la hora 0). */
+  /** Indice del mes en curso, 0..months. */
+  monthIndex: number;
+  months: number;
+  periods: Period[];
+  demandGwh: number;
+  embalsePct: number;
+  escasez: number;
   marginalPrice: number | null;
-  /** Precio de escasez: techo cuando no alcanza la oferta. */
-  scarcityPrice: number;
-  /** Serie de precios marginales, una por hora cerrada. */
   priceHistory: number[];
-  generators: Generator[];
-  blackouts: number;
+  bolsaHistory: number[];
+  resources: Resource[];
+  embalses: Embalse[];
+  agents: Agent[];
+  tieCapacityGwh: number;
+  tiePrice: number;
+  carbonPrice: number;
+  reconciliationPerGwh: number;
+  oefPenalty: number;
+  deficitMonths: number;
+  lastMonth: MonthRecord | null;
   winner: MarketWinner | null;
   finished: boolean;
+  score: Score;
+}
+
+export interface Scenario {
+  id: string;
+  name: string;
+  description: string;
+  tieCapacityGwh: number;
+  tiePrice: number;
+  carbonPrice: number;
+  reconciliationPerGwh: number;
+  oefPenalty: number;
+  /** Los 72 meses (2020-2025) con las series reales. */
+  periods: Period[];
+  resources: Resource[];
+  embalses: Embalse[];
+  agents: Agent[];
 }
 
 export interface MarketOptions {
   random?: () => number;
-  horizonHours?: number;
 }

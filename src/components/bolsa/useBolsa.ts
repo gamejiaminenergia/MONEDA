@@ -3,38 +3,32 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import type { BolsaDecisionResponse } from '@/lib/ai/bolsa';
-import { createMarket, stepMarket } from '@/lib/bolsa/engine';
-import type { AgentId, MarketState } from '@/lib/bolsa/types';
+import { createMarket, stepMarket, type OfferMap } from '@/lib/bolsa/engine';
+import { HISTORICO_SCENARIO, getScenario } from '@/lib/bolsa/scenario';
+import type { MonthRecord, MarketState } from '@/lib/bolsa/types';
 
-/** Una hora cerrada, para la torre de merito y las series. */
-export interface HourRecord {
-  hour: number;
-  demandMw: number;
-  marginalPrice: number;
-  deficitMw: number;
-  dispatched: { id: AgentId; price: number; quantityMw: number }[];
-}
-
-/** Copia superficial de la mesa: el motor muta, React necesita una identidad nueva. */
+/** Copia profunda de la mesa: el motor muta, React necesita una identidad nueva. */
 function snapshot(state: MarketState): MarketState {
   return {
     ...state,
     priceHistory: [...state.priceHistory],
-    generators: state.generators.map((generator) => ({ ...generator, lastOffer: { ...generator.lastOffer } })),
+    bolsaHistory: [...state.bolsaHistory],
+    resources: state.resources.map((resource) => ({ ...resource })),
+    embalses: state.embalses.map((embalse) => ({ ...embalse })),
+    agents: state.agents.map((agent) => ({ ...agent, resources: [...agent.resources], lastOffers: { ...agent.lastOffers } })),
+    score: { ...state.score },
+    lastMonth: state.lastMonth ? { ...state.lastMonth, dispatched: state.lastMonth.dispatched.map((unit) => ({ ...unit })) } : null,
   };
 }
 
 const newSessionId = (): string =>
   typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `ses-${Date.now()}`;
 
-/**
- * Bucle de BOLSA: pide las ofertas al servidor (un Jev por agente), avanza una
- * hora y guarda la historia. El navegador nunca habla con TypeSafe: solo con
- * `/api/bolsa/decision`.
- */
+/** Bucle de BOLSA mensual: un Jev por generador por mes. El navegador no ve la clave. */
 export function useBolsa() {
-  const [market, setMarket] = useState<MarketState>(() => createMarket());
-  const [hours, setHours] = useState<HourRecord[]>([]);
+  const [scenarioId, setScenarioId] = useState(HISTORICO_SCENARIO.id);
+  const [market, setMarket] = useState<MarketState>(() => createMarket(HISTORICO_SCENARIO));
+  const [months, setMonths] = useState<MonthRecord[]>([]);
   const [log, setLog] = useState<string[]>([]);
   const [running, setRunning] = useState(false);
   const [speedMs, setSpeedMs] = useState(1000);
@@ -75,36 +69,29 @@ export function useBolsa() {
       }
       const data = (await response.json()) as BolsaDecisionResponse;
       const next = snapshot(state);
-      const events = stepMarket(next, data.offers);
+      const events = stepMarket(next, data.offers as OfferMap);
       setMarket(next);
       if (data.usage.inputTokens) {
         setCost((previous) => ({ inputTokens: previous.inputTokens + (data.usage.inputTokens ?? 0), calls: previous.calls + 1 }));
       }
       for (const event of events) {
-        if (event.type === 'hora') {
-          setHours((previous) => [
-            ...previous,
-            {
-              hour: event.hour,
-              demandMw: event.demandMw,
-              marginalPrice: event.marginalPrice,
-              deficitMw: event.deficitMw,
-              dispatched: event.dispatched,
-            },
-          ]);
-          note(`Hora ${event.hour}: marginal ${Math.round(event.marginalPrice)} COP/kWh (demanda ${Math.round(event.demandMw)} MWh)`);
-        } else if (event.type === 'apagon') {
-          note(`APAGON en la hora ${event.hour}: faltaron ${Math.round(event.deficitMw)} MWh`);
+        if (event.type === 'mes') {
+          setMonths((previous) => [...previous, event.record]);
+          const record = event.record;
+          note(
+            `${record.month}: marginal ${Math.round(record.marginalPrice)} COP/kWh (bolsa real ${Math.round(next.periods[record.monthIndex]?.bolsaRef ?? 0)}, demanda ${Math.round(record.demandGwh)} GWh${record.importedGwh > 0 ? `, TIE ${Math.round(record.importedGwh)}` : ''})`,
+          );
+        } else if (event.type === 'deficit') {
+          note(`Racionamiento en el mes: faltaron ${Math.round(event.deficitGwh)} GWh`);
         } else if (event.type === 'insolvente') {
-          note(`${event.id} quedo insolvente y salio del mercado`);
+          note(`${event.id} (${event.role}) quedo insolvente`);
         } else if (event.type === 'fin') {
-          note(event.winner === 'agentes' ? 'Fin: ganan los agentes (se sirvio la demanda)' : 'Fin: gana la escasez (apagon)');
+          note(event.winner === 'agentes' ? 'Fin: ganan los agentes (sobrevivio al menos un generador)' : 'Fin: gana la escasez (sin generadores)');
         }
       }
       setError(null);
     } catch (cause) {
-      const message = cause instanceof Error ? cause.message : 'Error desconocido';
-      setError(message);
+      setError(cause instanceof Error ? cause.message : 'Error desconocido');
       setRunning(false);
     } finally {
       inFlight.current = false;
@@ -117,16 +104,21 @@ export function useBolsa() {
     return () => clearInterval(id);
   }, [running, speedMs, tick]);
 
-  const reset = useCallback(() => {
-    setMarket(createMarket());
-    setHours([]);
-    setLog([]);
-    setError(null);
-    setRunning(false);
-    setCost({ inputTokens: 0, calls: 0 });
-    saved.current = false;
-    setSessionId(newSessionId());
-  }, []);
+  const reset = useCallback(
+    (nextScenarioId = scenarioId) => {
+      const scenario = getScenario(nextScenarioId);
+      setScenarioId(nextScenarioId);
+      setMarket(createMarket(scenario));
+      setMonths([]);
+      setLog([]);
+      setError(null);
+      setRunning(false);
+      setCost({ inputTokens: 0, calls: 0 });
+      saved.current = false;
+      setSessionId(newSessionId());
+    },
+    [scenarioId],
+  );
 
   // Al terminar, la partida entera se guarda en Mongo (de mejor esfuerzo).
   useEffect(() => {
@@ -135,10 +127,14 @@ export function useBolsa() {
     const body = {
       sessionId,
       model: model === 'auto' ? 'jev-latest' : model,
+      scenario: scenarioId,
       outcome: market.winner,
-      horizonHours: market.horizonHours,
-      hours,
-      generators: market.generators,
+      months,
+      periods: market.periods,
+      resources: market.resources,
+      agents: market.agents,
+      embalses: market.embalses,
+      score: market.score,
       log,
     };
     void fetch('/api/bolsa/session', {
@@ -146,11 +142,12 @@ export function useBolsa() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     }).catch(() => undefined);
-  }, [market.finished, market.winner, market.horizonHours, market.generators, hours, log, model, sessionId]);
+  }, [market.finished, market.winner, market.periods, market.resources, market.agents, market.embalses, market.score, months, log, model, scenarioId, sessionId]);
 
   return {
+    scenarioId,
     market,
-    hours,
+    months,
     log,
     running,
     speedMs,
