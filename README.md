@@ -69,6 +69,10 @@ no sabe que existe un proveedor de modelo.**
 | Mesa | `src/lib/client/board` | La escena de Phaser 4: dibujo, particulas, tweens, camara y audio. |
 | UI | `src/components`, `src/hooks` | HUD, consola del modelo y estados. React solo pinta; el juego corre fuera. |
 
+El repo tambien trae **BOLSA** (el MEM en miniatura, ver abajo) con su backend
+**FastAPI** en `api/`, y la documentacion de todo en `docs/bolsa/`,
+`docs/bolitas/` y `docs/mem/`. La guia para agentes es `AGENTS.md`.
+
 ### Cambios de fondo frente al prototipo
 
 0. **Huir, no tapar.** No hay paddles ni vidas. Hay diez jugadores, cada uno con
@@ -523,9 +527,11 @@ todos. La hidro depende del embalse real, hay **ENFICC/OEF**, **precio de escase
 **reconciliaciones**, **TIE** y **emisiones**, y gana quien termina los 72 meses con
 al menos un generador solvente. La bolsa real se dibuja como referencia.
 
-Se abre en `/bolsa`. Concepto en `docs/bolsa/` (incluye el plan del MEM completo),
-la comparacion con el MEM en `docs/bolitas/INFORME-BOLITAS-MEM.md`, las consultas
-reales en `docs/mem/` y el exportador de escenario en `docs/mem/scenario.sql`.
+Se abre en `/bolsa`. Tiene **backend propio en Python/FastAPI** (`api/`), que
+ingiere el MEM real (skill `elecdb`) detras de puertos y adaptadores; el frontend
+Next.js todavia usa el backend TS de BOLSA mientras se migra. Concepto y planes en
+`docs/bolsa/`, la comparacion con el MEM en `docs/bolitas/INFORME-BOLITAS-MEM.md`,
+los datos reales en `docs/mem/` y el backend en `api/README.md`.
 
 ## Licencia
 

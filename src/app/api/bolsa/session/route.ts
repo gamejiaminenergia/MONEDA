@@ -2,8 +2,8 @@ import { NextResponse } from 'next/server';
 import { z } from 'zod';
 
 import type { ErrorResponse } from '@/lib/ai/contracts';
+import { mongoSessionRepository } from '@/server/bolsa';
 import { logger } from '@/server/log';
-import { listSessions, saveSession } from '@/server/mongo';
 
 const log = logger.child('api/bolsa/session');
 
@@ -24,7 +24,7 @@ const sessionSchema = z.object({
   log: z.array(z.string()).max(500),
 });
 
-/** POST /api/bolsa/session — guarda una partida terminada. De mejor esfuerzo. */
+/** POST /api/bolsa/session — controlador: valida y delega en el repositorio. */
 export async function POST(request: Request) {
   let body: unknown;
   try {
@@ -36,7 +36,7 @@ export async function POST(request: Request) {
   if (!parsed.success) {
     return NextResponse.json<ErrorResponse>({ error: 'La sesion no tiene el formato esperado', code: 'bad-request' }, { status: 400 });
   }
-  const id = await saveSession(parsed.data);
+  const id = await mongoSessionRepository.save(parsed.data);
   if (!id) {
     return NextResponse.json({ stored: false, reason: 'mongo-no-configurado' }, { status: 200 });
   }
@@ -46,7 +46,7 @@ export async function POST(request: Request) {
 /** GET /api/bolsa/session — ultimas sesiones (resumen). */
 export async function GET(request: Request) {
   const limit = Number(new URL(request.url).searchParams.get('limit') ?? 50);
-  const sessions = await listSessions(Number.isFinite(limit) && limit > 0 ? Math.min(limit, 200) : 50);
+  const sessions = await mongoSessionRepository.list(Number.isFinite(limit) && limit > 0 ? Math.min(limit, 200) : 50);
   log.debug('sesiones listadas', { count: sessions.length });
   return NextResponse.json({ sessions });
 }

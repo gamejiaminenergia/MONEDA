@@ -1,19 +1,10 @@
 import { NextResponse } from 'next/server';
 
-import {
-  bolsaDecisionRequestSchema,
-  normalizePriceBand,
-  normalizeQuantityBand,
-  offerFromBands,
-  type BolsaDecisionResponse,
-} from '@/lib/ai/bolsa';
+import { bolsaDecisionRequestSchema, type BolsaDecisionResponse } from '@/lib/ai/bolsa';
 import type { ErrorResponse } from '@/lib/ai/contracts';
-import { buildGeneratorQuestions, buildGeneratorState } from '@/lib/bolsa/prompt';
-import type { AgentId, Offer } from '@/lib/bolsa/types';
-import type { QuestionSet } from '@/lib/game/prompt';
-import { elapsedMs, logger } from '@/server/log';
+import { createOfferService } from '@/server/bolsa';
+import { logger } from '@/server/log';
 import { ModelError } from '@/server/model-error';
-import { askSystemOne, typesafeConfig } from '@/server/typesafe';
 
 const log = logger.child('api/bolsa');
 
@@ -25,11 +16,10 @@ function fail(error: string, code: ErrorResponse['code'], status: number) {
 }
 
 /**
- * POST /api/bolsa/decision
+ * POST /api/bolsa/decision — controlador de la decision mensual.
  *
- * Devuelve la oferta de cada generador vivo, recurso por recurso. Hay **un Jev
- * por generador**: decide toda su cartera viendo solo su informacion privada. El
- * navegador nunca habla con TypeSafe ni ve la API key.
+ * Solo valida el estado, delega en el servicio (`OfferService`) y traduce
+ * errores. No sabe de TypeSafe ni de prompts: eso vive en el backend.
  */
 export async function POST(request: Request) {
   let body: unknown;
@@ -45,83 +35,22 @@ export async function POST(request: Request) {
     return fail('El estado del mercado no tiene el formato esperado', 'bad-request', 400);
   }
 
-  const { market } = parsed.data;
-  const config = typesafeConfig();
-  const requested = parsed.data.model?.trim();
-  const model = requested && requested !== 'auto' ? requested : config.model;
-  const startedAt = Date.now();
-
-  if (!config.apiKey) {
-    log.error('falta TYPESAFE_API_KEY', { model });
-    return fail('TypeSafe no esta configurado: falta TYPESAFE_API_KEY', 'model-not-configured', 502);
-  }
-
-  const generators = market.agents.filter((agent) => agent.role === 'generador' && agent.alive);
-  if (generators.length === 0) {
-    return NextResponse.json<BolsaDecisionResponse>({
-      model,
-      latencyMs: Date.now() - startedAt,
-      offers: {},
-      usage: { inputTokens: null, outputTokens: null },
+  try {
+    const service = createOfferService();
+    const result = await service.decide(parsed.data.market, {
+      ...(parsed.data.model ? { model: parsed.data.model } : {}),
+      signal: request.signal,
     });
-  }
-
-  const settled = await Promise.all(
-    generators.map(async (agent) => {
-      try {
-        const questions = buildGeneratorQuestions(agent, market) as unknown as QuestionSet;
-        const call = await askSystemOne({
-          model,
-          state: buildGeneratorState(market, agent),
-          questions,
-          signal: request.signal,
-          timeoutMs: config.timeoutMs,
-        });
-        const offers: Record<string, Offer> = {};
-        for (const resourceId of agent.resources) {
-          const resource = market.resources.find((item) => item.id === resourceId);
-          const priceAnswer = call.answers[`${resourceId}__precio`];
-          const quantityAnswer = call.answers[`${resourceId}__cantidad`];
-          if (!resource || !priceAnswer || !quantityAnswer) continue;
-          offers[resourceId] = offerFromBands(resource, normalizePriceBand(priceAnswer), normalizeQuantityBand(quantityAnswer));
-        }
-        if (Object.keys(offers).length === 0) {
-          throw new ModelError('model-malformed', `Sin ofertas para ${agent.name}`);
-        }
-        return { id: agent.id, offers, usage: call.usage ?? null };
-      } catch (error) {
-        // Un generador sin respuesta no detiene la hora: el motor reusa su ultima oferta.
-        log.warn('generador sin oferta', { id: agent.id, error: error instanceof Error ? error.message : String(error) });
-        return null;
-      }
-    }),
-  );
-
-  const offers: Partial<Record<AgentId, Record<string, Offer>>> = {};
-  let inputTokens: number | null = 0;
-  let outputTokens: number | null = 0;
-  let answered = 0;
-  for (const item of settled) {
-    if (!item) continue;
-    offers[item.id] = item.offers;
-    answered += 1;
-    if (item.usage) {
-      inputTokens = (inputTokens ?? 0) + (item.usage.input_tokens ?? 0);
-      outputTokens = (outputTokens ?? 0) + (item.usage.output_tokens ?? 0);
+    return NextResponse.json<BolsaDecisionResponse>(result);
+  } catch (error) {
+    if (request.signal.aborted || (error instanceof Error && error.name === 'AbortError')) {
+      return new Response(null, { status: 499 });
     }
+    const modelError =
+      error instanceof ModelError
+        ? error
+        : new ModelError('model-unreachable', error instanceof Error ? error.message : 'Error desconocido');
+    log.error('fallo del modelo', { code: modelError.code, error: modelError });
+    return fail(modelError.message, modelError.code, 502);
   }
-
-  if (answered === 0) {
-    log.error('ningun generador respondio', { model, ms: elapsedMs(startedAt) });
-    return fail('Ningun generador obtuvo oferta del modelo', 'model-malformed', 502);
-  }
-
-  log.info('ofertas', { model, mes: market.monthIndex, generadores: answered, inTokens: inputTokens, ms: elapsedMs(startedAt) });
-
-  return NextResponse.json<BolsaDecisionResponse>({
-    model,
-    latencyMs: Date.now() - startedAt,
-    offers,
-    usage: { inputTokens, outputTokens },
-  });
 }

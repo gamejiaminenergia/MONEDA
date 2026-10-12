@@ -8,6 +8,8 @@ demanda y contratos, ENFICC/OEF, escasez, reconciliaciones, TIE y emisiones.
 - Plan del MVP: `PLAN-BOLSA.md`.
 - Plan ambicioso (MEM completo): `PLAN-BOLSA-MEM.md`.
 - Plan mensual (2020-2025): `PLAN-BOLSA-MENSUAL.md`.
+- Plan del backend FastAPI: `PLAN-BACKEND-MEM.md`.
+- Backend (servicio aparte, FastAPI): `../../api/README.md`.
 - Puente conceptual con el MEM: `../bolitas/INFORME-BOLITAS-MEM.md`.
 - Datos reales del MEM: `../mem/README.md`.
 
@@ -27,30 +29,54 @@ horizonte es **2020-01 -> 2025-12** con las series reales de XM (demanda, bolsa,
 escasez, embalse y aportes). La **bolsa real** aparece como linea de referencia y
 el marcador compara el marginal del juego contra ella.
 
-## Codigo
+## Arquitectura (MVC + SOLID, backend y frontend independientes)
 
-| Archivo | Que hace |
-| --- | --- |
-| `src/lib/bolsa/types.ts` | El MEM en miniatura (recursos, agentes, embalses, mercado). |
-| `src/lib/bolsa/constants.ts` | Horizonte, bandas de oferta, curva de demanda, solar/eolica. |
-| `src/lib/bolsa/scenario.ts` | Escenarios `arcade` y `real`. |
-| `src/lib/bolsa/hydrology.ts` | Embalses, aportes de rios y vertimientos. |
-| `src/lib/bolsa/market.ts` | Orden de merito, precio marginal y valvula TIE (puro). |
-| `src/lib/bolsa/engine.ts` | La hora: despacho, liquidacion, OEF, hidrologia, insolvencia, fin. |
-| `src/lib/bolsa/prompt.ts` | Estado y preguntas por generador (cartera). |
-| `src/lib/ai/bolsa.ts` | Contratos zod y normalizacion de ofertas. |
-| `src/app/api/bolsa/decision/route.ts` | Un Jev por generador (paralelo). |
-| `src/app/api/bolsa/session/route.ts` | Guarda la partida en Mongo. |
-| `src/components/bolsa/*` | Sala de despacho (React) y bucle del cliente. |
-| `src/app/bolsa/page.tsx` | La pagina `/bolsa`. |
-| `docs/mem/scenario.sql` | Exporta un escenario real desde XM (elecdb). |
+Misma separacion que Nimble Pong: el **backend** no conoce el navegador y el
+**frontend** no conoce la clave. La unica frontera es `/api/bolsa/*`. Cada capa
+tiene una responsabilidad (SRP) y depende de **puertos** (interfaces), no de
+implementaciones (DIP); los adaptadores se inyectan en un punto de composicion.
+
+**Backend**
+
+| Capa MVC | Archivo | Rol |
+| --- | --- | --- |
+| Modelo (dominio) | `src/lib/bolsa/*` | MEM en miniatura, puro y testeable en Node. |
+| Modelo (contratos) | `src/lib/ai/bolsa.ts` | Esquemas zod y normalizacion de ofertas. |
+| **Controlador** | `src/app/api/bolsa/{decision,session}/route.ts` | Valida, delega y traduce errores. |
+| Servicio (caso de uso) | `src/server/bolsa/offer-service.ts` | Decide las ofertas: un Jev por generador. |
+| Puerto (`ModelGateway`) | `src/server/bolsa/ports.ts` | Interfaz hacia el proveedor del modelo. |
+| Adaptador | `src/server/bolsa/model-gateway.ts` | TypeSafe (`askSystemOne`). |
+| Puerto (`SessionRepository`) | `src/server/bolsa/ports.ts` | Interfaz de historico. |
+| Adaptador | `src/server/bolsa/session-repository.ts` | Mongo. |
+| Mapeo (SRP) | `src/server/bolsa/offer-mapper.ts` | Respuestas del modelo -> ofertas. |
+| Composicion | `src/server/bolsa/index.ts` | Inyecta los adaptadores. |
+| Datos reales | `docs/mem/scenario.sql` | Exporta un escenario desde XM (elecdb). |
+
+**Frontend**
+
+| Capa MVC | Archivo | Rol |
+| --- | --- | --- |
+| Modelo | `src/lib/client/bolsa/session.ts` | Estado, meses, costo y persistencia. |
+| Puerto (`DecisionGateway`) | `src/lib/client/bolsa/ports.ts` | Interfaz hacia el backend de decisiones. |
+| Puerto (`HistoryGateway`) | `src/lib/client/bolsa/ports.ts` | Interfaz de historico. |
+| Adaptadores | `src/lib/client/bolsa/gateways.ts` | HTTP (`/api/bolsa/*`). |
+| Bucle | `src/lib/client/bolsa/decision-loop.ts` | Pide ofertas y avanza el mes. |
+| **Controlador** | `src/hooks/useBolsa.ts` | Une modelo y puertos; expone estado/acciones. |
+| Vista | `src/components/bolsa/*` | Componentes con una sola responsabilidad. |
+
+**SOLID en una linea.** SRP: cada archivo hace una cosa (mapeo, gateway, bucle,
+vista). DIP: servicios y sesion dependen de interfaces; TypeSafe y Mongo son
+adaptadores intercambiables. OCP: un proveedor o transporte nuevo se añade con un
+adaptador, sin tocar el dominio. ISP: puertos chicos (`ModelGateway`,
+`DecisionGateway`, `HistoryGateway`). LSP/abstraccion: los dobles de prueba
+sustituyen a los adaptadores (ver `tests/bolsa-architecture.test.ts`).
 
 ## Correr
 
 ```bash
 npm run dev
 # abrir http://localhost:3000/bolsa
-npm run verify        # typecheck + lint + 12 pruebas del motor
+npm run verify        # typecheck + lint + 119 pruebas
 ```
 
 El navegador nunca habla con TypeSafe: todo pasa por `/api/bolsa/decision`. La
