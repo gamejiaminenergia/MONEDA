@@ -17,9 +17,11 @@ import { useTrace } from '@/hooks/useTrace';
 import type { DecisionResponse } from '@/lib/ai/contracts';
 import { createBoard, type BoardHandle } from '@/lib/client/board/board';
 import { DecisionLoop } from '@/lib/client/decision-loop';
+import { MatchRecorder, SAMPLE_MS } from '@/lib/client/match-recorder';
+import { discardMatch, submitMatch } from '@/lib/client/matches';
 import { defaultSettings } from '@/lib/client/settings';
 import type { Status } from '@/lib/client/ui';
-import { AUTO_RESTART_MS } from '@/lib/game/constants';
+import { AUTO_RESTART_MS, SURVIVAL_MS } from '@/lib/game/constants';
 import { GameEngine } from '@/lib/game/engine';
 import { PLAYERS, type Player } from '@/lib/game/players';
 import type { GameEvent, GameSnapshot, PlayerRecord } from '@/lib/game/types';
@@ -61,6 +63,8 @@ const emptyWins = (): PlayerRecord<number> =>
 
 export function GameShell() {
   const [engine] = useState(() => new GameEngine());
+  // Junta la telemetria de la ronda en curso; solo se guarda si llega al minuto.
+  const [recorder] = useState(() => new MatchRecorder());
   const ui = useEngineUi(engine);
   const { settings, update } = useGameSettings();
   const { theme, toggle: toggleTheme } = useTheme();
@@ -86,12 +90,56 @@ export function GameShell() {
   const [wins, setWins] = useState<PlayerRecord<number>>(emptyWins);
   const [round, setRound] = useState(1);
   const [countdownSec, setCountdownSec] = useState<number | null>(null);
+  /** Segundos que faltan para la tregua (el minuto). `null` si no hay ronda. */
+  const [survivalSec, setSurvivalSec] = useState<number | null>(null);
+  /** El numero de ronda para el historico: `onEvent` no ve el estado de React. */
+  const roundRef = useRef(round);
+  /**
+   * Identidad de la partida en curso. Viaja en cada `/api/decision` para que el
+   * servidor archive las peticiones/respuestas de Jev bajo esta partida, y es la
+   * misma que lleva el documento que se guarda al final.
+   */
+  const matchIdRef = useRef<string>(crypto.randomUUID());
 
   /* ------------------------------ preferencias ---------------------------- */
 
   useEffect(() => {
     settingsRef.current = settings;
   }, [settings]);
+
+  useEffect(() => {
+    roundRef.current = round;
+  }, [round]);
+
+  /**
+   * Muestreo de la mesa para el historico: una foto cada `SAMPLE_MS` mientras
+   * la ronda corre. Guarda posiciones, no dibuja, y no toca React.
+   */
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (engine.finished || engine.isPaused) return;
+      recorder.sample(engine.view());
+    }, SAMPLE_MS);
+    return () => window.clearInterval(timer);
+  }, [engine, recorder]);
+
+  /**
+   * Cuenta atras visible hacia la tregua: lee el reloj del motor cada 250 ms
+   * (React no corre a 60 fps) y solo cambia cuando cambia el segundo.
+   */
+  useEffect(() => {
+    const tick = (): void => {
+      if (engine.finished || engine.isPaused) {
+        setSurvivalSec(null);
+        return;
+      }
+      const remaining = Math.max(0, SURVIVAL_MS - engine.view().clockMs);
+      setSurvivalSec(Math.ceil(remaining / 1000));
+    };
+    tick();
+    const timer = window.setInterval(tick, 250);
+    return () => window.clearInterval(timer);
+  }, [engine]);
 
   /** El silencio viaja a la escena sin recrearla. */
   useEffect(() => {
@@ -176,6 +224,15 @@ export function GameShell() {
     enabled: settings.showConsole,
   });
 
+  /**
+   * Cierra la partida en curso y abre una nueva. `discard` libera las llamadas
+   * a Jev archivadas: no se pide en la tregua, donde el POST ya las tomo.
+   */
+  const rotateMatch = useCallback((discard: boolean) => {
+    if (discard) void discardMatch(matchIdRef.current);
+    matchIdRef.current = crypto.randomUUID();
+  }, []);
+
   /* --------------------------- bucle de simulacion ------------------------ */
 
   useEffect(() => {
@@ -193,12 +250,48 @@ export function GameShell() {
       muted: settingsRef.current.muted,
       theme: themeRef.current,
       onEvent: (event: GameEvent) => {
+        recorder.note(event, engine.view().clockMs);
+
+        // Tregua: se aguanto el minuto, reviven los muertos y gana la mesa
+        // entera. Es la UNICA partida que se guarda: la ronda completa. Las que
+        // terminan antes (ganador o grilla) se descartan.
+        if (event.type === 'truce') {
+          recordSurvival(activeModelRef.current, engine.ui().clockMs);
+          setWins((current) =>
+            Object.fromEntries(
+              PLAYERS.map((player) => [player, current[player] + 1]),
+            ) as PlayerRecord<number>,
+          );
+          const stats = engine.ui();
+          const document = recorder.finish(
+            {
+              round: roundRef.current,
+              outcome: 'truce',
+              winner: null,
+              model: activeModelRef.current,
+              intervalMs: settingsRef.current.intervalMs,
+              snapshot: engine.snapshot(),
+              stats,
+            },
+            matchIdRef.current,
+          );
+          void submitMatch(document);
+          recorder.reset();
+          // El POST ya tomo las llamadas de Jev: no hay que descartar nada.
+          rotateMatch(false);
+          return;
+        }
+
         if (event.type !== 'game-over') return;
         recordSurvival(activeModelRef.current, event.winner === null ? 0 : engine.ui().clockMs);
         if (event.winner) {
           const champion: Player = event.winner;
           setWins((current) => ({ ...current, [champion]: current[champion] + 1 }));
         }
+        // No llego al minuto: no es una partida completa y no se guarda. Se
+        // sueltan sus llamadas a Jev y se abre la partida siguiente.
+        recorder.reset();
+        rotateMatch(true);
       },
     }).then((created) => {
       // StrictMode monta dos veces en desarrollo: si este efecto ya se limpio,
@@ -218,7 +311,7 @@ export function GameShell() {
       handle?.destroy();
       boardHandleRef.current = null;
     };
-  }, [engine, recordSurvival]);
+  }, [engine, recordSurvival, recorder, rotateMatch]);
 
   /* ---------------------------- bucle infinito ---------------------------- */
 
@@ -228,7 +321,10 @@ export function GameShell() {
    * es un bucle mientras la pestana siga abierta.
    */
   useEffect(() => {
-    if (!ui.winner) return;
+    // Fin de ronda con ganador, con la mesa vacia (la grilla se los llevo a
+    // todos) o con tregua (aguantaron el minuto): la ronda siguiente arranca
+    // sola en los tres casos.
+    if (!ui.winner && !ui.draw && !ui.truce) return;
 
     const deadline = performance.now() + AUTO_RESTART_MS;
 
@@ -247,7 +343,7 @@ export function GameShell() {
       window.clearInterval(countdown);
       window.clearTimeout(restartTimer);
     };
-  }, [engine, ui.winner]);
+  }, [engine, ui.winner, ui.draw, ui.truce]);
 
   /* --------------------------- bucle de decisiones ------------------------ */
 
@@ -261,7 +357,12 @@ export function GameShell() {
       // Mientras el catalogo no ha llegado no mandamos un modelo inventado:
       // el servidor usa el suyo por defecto.
       const requestedModel = modelsRef.current.has(model) ? model : undefined;
-      return requestDecision(signal, { snapshot, model: requestedModel, trace });
+      return requestDecision(signal, {
+        snapshot,
+        model: requestedModel,
+        trace,
+        matchId: matchIdRef.current,
+      });
     },
     [],
   );
@@ -273,6 +374,7 @@ export function GameShell() {
       request: decide,
       onResult: (result) => {
         activeModelRef.current = result.model;
+        recorder.decision(result, engine.view().clockMs);
         record(result.model, { decisions: 1, latencyMs: result.latencyMs });
         setStatus({ text: `conectado · ${result.model} · ${result.latencyMs} ms`, kind: 'on' });
       },
@@ -285,16 +387,18 @@ export function GameShell() {
 
     loop.start();
     return () => loop.stop();
-  }, [decide, engine, record]);
+  }, [decide, engine, record, recorder]);
 
   /* ------------------------------- acciones ------------------------------- */
 
   const restart = useCallback(() => {
     engine.reset();
+    // Reinicio a mano: la ronda a medias no se guarda y se sueltan sus llamadas.
+    rotateMatch(true);
     setCountdownSec(null);
     setRound((current) => current + 1);
     setStatus({ text: `ronda nueva · ${PLAYERS.length} jugadores vivos`, kind: 'on' });
-  }, [engine]);
+  }, [engine, rotateMatch]);
 
   const togglePause = useCallback(() => {
     engine.togglePause();
@@ -354,12 +458,16 @@ export function GameShell() {
             thinking={ui.thinking}
             paused={ui.paused}
             winner={ui.winner}
+            draw={ui.draw}
+            truce={ui.truce}
             wins={wins}
             round={round}
             countdownSec={countdownSec ?? Math.ceil(AUTO_RESTART_MS / 1000)}
             decisions={ui.decisions}
             avgLatencyMs={ui.avgLatencyMs}
             clockMs={ui.clockMs}
+            survivalSec={survivalSec}
+            survivalMs={SURVIVAL_MS}
             statusKind={status.kind}
             onRestart={restart}
           />
@@ -374,6 +482,7 @@ export function GameShell() {
             avgLatencyMs={ui.avgLatencyMs}
             bounces={ui.bounces}
             kills={ui.kills}
+            crowdKills={ui.crowdKills}
             aliveCount={aliveCount}
             ballSpeed={ui.ballSpeed}
             clockMs={ui.clockMs}

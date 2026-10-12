@@ -79,7 +79,7 @@ describe('bucle de rondas', () => {
     };
   };
 
-  it('ninguna ronda se queda sin ganador', () => {
+  it('toda ronda termina: gana el ultimo en pie o se la lleva la grilla', () => {
     for (let seed = 1; seed <= 8; seed++) {
       const engine = new GameEngine({ random: seededRandom(seed) });
       let elapsed = 0;
@@ -99,12 +99,24 @@ describe('bucle de rondas', () => {
       }
 
       expect(engine.finished).toBe(true);
-      expect(engine.alivePlayers()).toHaveLength(1);
-      expect(engine.ui().winner).toBe(engine.alivePlayers()[0]);
+      const alive = engine.alivePlayers();
+      if (engine.ui().winner) {
+        expect(alive).toHaveLength(1);
+        expect(engine.ui().winner).toBe(alive[0]);
+      } else if (engine.ui().truce) {
+        // Aguanto el minuto: reviven los muertos y la ronda es de todos.
+        expect(alive).toHaveLength(PLAYERS.length);
+      } else {
+        // La grilla se llevo a todos: ronda cerrada sin ganador, sin colgarse.
+        expect(engine.ui().draw).toBe(true);
+        expect(alive).toHaveLength(0);
+      }
 
       // El reinicio que dispara la UI deja la mesa lista para la ronda siguiente.
       engine.reset();
       expect(engine.finished).toBe(false);
+      expect(engine.ui().draw).toBe(false);
+      expect(engine.ui().truce).toBe(false);
       expect(engine.alivePlayers()).toHaveLength(PLAYERS.length);
       expect(engine.isPaused).toBe(false);
     }

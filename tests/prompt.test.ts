@@ -5,11 +5,18 @@ import { ALL_MOVES } from '@/lib/game/moves';
 import {
   BALL_MAX,
   BALL_MIN,
+  CROWD_CHECK_MS,
+  CROWD_LIMIT,
+  CROWD_STRIKES,
   DANGER_R,
+  GRID_CELL,
+  GRID_COLS,
+  GRID_ROWS,
   KILL_R,
   PLAY_MAX,
   PLAY_MIN,
   RUNNER_SPEED,
+  SURVIVAL_MS,
 } from '@/lib/game/constants';
 import { PLAYERS, type Player } from '@/lib/game/players';
 import type { GameSnapshot, PlayerRecord, PlayerSnapshot } from '@/lib/game/types';
@@ -21,6 +28,8 @@ const player = (over: Partial<PlayerSnapshot> = {}): PlayerSnapshot => ({
   threatMs: null,
   threatX: null,
   threatY: null,
+  cell: { col: 3, row: 4 },
+  cellCount: 1,
   alive: true,
   ...over,
 });
@@ -50,7 +59,16 @@ const snapshot = (over: Partial<GameSnapshot> = {}): GameSnapshot => ({
   dangerRadius: DANGER_R,
   field: { min: PLAY_MIN, max: PLAY_MAX },
   ballField: { min: BALL_MIN, max: BALL_MAX },
+  grid: {
+    cell: GRID_CELL,
+    cols: GRID_COLS,
+    rows: GRID_ROWS,
+    limit: CROWD_LIMIT,
+    strikes: CROWD_STRIKES,
+    checkMs: CROWD_CHECK_MS,
+  },
   runnerSpeed: RUNNER_SPEED,
+  survivalMs: SURVIVAL_MS,
   clockMs: 4200,
   paused: false,
   winner: null,
@@ -82,6 +100,29 @@ describe('prompt', () => {
     const text = buildStatePrompt(snapshot());
     expect(text).toContain('CADA REBOTE LA DESVIA un poco');
     expect(text).toContain('solo se puede planificar el vuelo que esta en marcha');
+  });
+
+  it('advierte de la grilla y situa a cada jugador en su celda', () => {
+    const text = buildStatePrompt(snapshot());
+    expect(text).toContain(`GRILLA invisible de ${GRID_COLS} por ${GRID_ROWS} celdas`);
+    expect(text).toContain(`si mas de ${CROWD_LIMIT} jugadores vivos se juntan`);
+    expect(text).toContain('celda (3, 4) con 1 jugadores');
+  });
+
+  it('da la posicion relativa de cada uno frente a los demas vivos', () => {
+    const text = buildStatePrompt(snapshot());
+    expect(text).toContain('Posiciones relativas');
+    // Desde el azul (640, 210), el rojo (120, 150) queda a 523 px hacia la izquierda.
+    expect(text).toContain('rojo a 523 px hacia izquierda');
+    // Los que comparten el punto por defecto se marcan como pegados.
+    expect(text).toContain('pegado');
+  });
+
+  it('anuncia la meta colectiva: aguantar el minuto hace ganar a todos', () => {
+    const text = buildStatePrompt(snapshot());
+    expect(text).toContain('META COLECTIVA');
+    expect(text).toContain('reviven todos los muertos y GANAN TODOS');
+    expect(text).toContain(`${Math.round(SURVIVAL_MS / 1000)} segundos`);
   });
 
   it('da las medidas de la mesa y los radios', () => {

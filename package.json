@@ -1,7 +1,7 @@
 {
   "name": "nimble-pong",
   "version": "0.2.0",
-  "description": "Have No Mouth, and I Must Scream IA: pong de diez jugadores con nombre de color donde cada jugada la decide la API System One de TypeSafe. Un roce y el jugador muere; gana el ultimo que siga vivo.",
+  "description": "Have No Mouth, and I Must Scream IA: pong de diez jugadores con nombre de color donde cada jugada la decide la API System One de TypeSafe. Un roce de la bola mata, y cuatro o mas apinados en una celda de la grilla tambien; gana el ultimo que siga vivo, o la mesa entera si aguanta un minuto hasta la tregua colectiva.",
   "private": true,
   "license": "MIT",
   "type": "module",
@@ -30,6 +30,7 @@
     "verify": "npm run typecheck && npm run lint && npm run test"
   },
   "dependencies": {
+    "mongodb": "^7.7.0",
     "next": "16.3.8",
     "phaser": "^4.2.1",
     "planck": "^1.5.0",

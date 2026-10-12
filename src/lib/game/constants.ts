@@ -23,22 +23,28 @@ export const AUTO_RESTART_MS = 3500;
 
 export const CENTER = H / 2;
 
-/**
- * Velocidad de la bola. Va deliberadamente por debajo de la del jugador
- * (300 px/s) y no la cambian ni los rebotes ni las muertes: asi una decision
- * tarda en quedar obsoleta y el juego se puede leer y planificar en vez de
- * adivinar. La mesa ya no se cierra ni acelera sola.
- *
- * El jugador si puede moverla en vivo con el control del panel
- * (`MIN_BALL_SPEED`..`MAX_BALL_SPEED`); el tope se queda cerca de la velocidad
- * del corredor para que el juego siga siendo de decision y no de reflejos.
- */
-export const BALL_SPEED = 210;
-
 /** Rango del control "velocidad de la bola", en px/s. */
 export const MIN_BALL_SPEED = 90;
-export const MAX_BALL_SPEED = 420;
+/** El techo es el doble de la velocidad del corredor (300 px/s). */
+export const MAX_BALL_SPEED = 840;
 export const BALL_SPEED_STEP = 10;
+
+/**
+ * Velocidad de la bola por defecto: la **maxima** (840 px/s, casi el triple de
+ * la del corredor). La bola no cambia de velocidad sola —ni los rebotes ni las
+ * muertes la tocan— pero `setBallSpeed` (el control "velocidad bola" del panel)
+ * la baja en vivo: el juego arranca en su punto mas brutal y el jugador puede
+ * aflojarlo. Con la bola a tope, aguantar el minuto para la tregua es la hazaña.
+ */
+export const BALL_SPEED = MAX_BALL_SPEED;
+
+/**
+ * La meta colectiva. Si la ronda llega a este tiempo con al menos un jugador
+ * vivo, no gana uno: reviven los muertos y ganan todos (una tregua). Es el
+ * unico cierre que premia sobrevivir en grupo, y el motivo de que el techo de
+ * la bola haya subido: aguantar un minuto con la bola al doble es la hazaña.
+ */
+export const SURVIVAL_MS = 60_000;
 
 /**
  * Cuanto tuerce el rumbo la bola en cada rebote, en radianes.
@@ -67,6 +73,28 @@ export const BALL_MAX = W - PAD - BALL_R;
 export const KILL_R = BALL_R + RUNNER_R;
 /** Radio de aviso: la prediccion avisa antes de que el roce sea mortal. */
 export const DANGER_R = KILL_R + 30;
+
+/**
+ * La grilla antiagolpamiento.
+ *
+ * La mesa se parte en celdas del tamano justo para un cuerpo: compartir una
+ * celda ya es pisarse. Si una celda pasa de `CROWD_LIMIT` corredores vivos y lo
+ * aguanta `CROWD_STRIKES` revisiones seguidas (`CROWD_CHECK_MS` cada una),
+ * revienta y mueren todos los que estan dentro. Es el castigo a acampar en un
+ * rincon: la unica regla que ata a los jugadores entre si en vez de a la bola.
+ *
+ * `GRID_CELL` sale de repartir el ancho jugable (sin marco) en `GRID_COLS`
+ * columnas; con 16 celdas da 42 px, poco mas que el diametro de un corredor.
+ */
+export const GRID_COLS = 16;
+export const GRID_ROWS = 16;
+export const GRID_CELL = (W - 2 * PAD) / GRID_COLS;
+/** Mas de esto en una celda: cuatro o mas. */
+export const CROWD_LIMIT = 3;
+/** Cada cuanto se revisa la aglomeracion. */
+export const CROWD_CHECK_MS = 200;
+/** Revisiones consecutivas sobre el limite antes de que la celda reviente. */
+export const CROWD_STRIKES = 5;
 
 export const DEFAULT_INTERVAL_MS = 700;
 export const MIN_INTERVAL_MS = 300;

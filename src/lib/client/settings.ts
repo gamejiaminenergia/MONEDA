@@ -33,7 +33,9 @@ export const defaultSettings: GameSettings = {
   trace: true,
 };
 
-const STORAGE_KEY = 'nimble.settings.v8';
+// v9: la velocidad de la bola por defecto pasa a ser la maxima, asi que se
+// descarta lo guardado con el default viejo (si no, seguiria pesando).
+const STORAGE_KEY = 'nimble.settings.v9';
 
 const clampNumber = (value: number, min: number, max: number): number =>
   Math.max(min, Math.min(max, value));

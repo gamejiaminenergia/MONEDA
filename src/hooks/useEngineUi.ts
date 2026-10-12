@@ -32,6 +32,8 @@ const IDLE_UI: UiState = {
     PLAYERS.map((player) => [player, idlePlayer(player)]),
   ) as PlayerRecord<PlayerUiState>,
   winner: null,
+  draw: false,
+  truce: false,
   paused: false,
   thinking: false,
   aliveCount: PLAYERS.length,
@@ -40,6 +42,7 @@ const IDLE_UI: UiState = {
   lastLatencyMs: null,
   bounces: 0,
   kills: 0,
+  crowdKills: 0,
   clockMs: 0,
   ballSpeed: BALL_SPEED,
 };

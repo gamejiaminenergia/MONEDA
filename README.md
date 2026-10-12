@@ -7,7 +7,13 @@ Pong de diez jugadores con IA —rojo, naranja, amarillo, lima, verde, turquesa,
 cian, azul, morado y rosa— en el que cada jugada la decide la API System One de
 TypeSafe. Ya **no hay paddles ni vidas**: los diez son corredores que huyen
 por toda la mesa, la bola rebota contra las paredes indefinidamente y **un solo
-roce mata**. Gana el último que siga vivo.
+roce mata**. Y hay una segunda forma de morir: la mesa esta partida en una
+**grilla invisible** y **cuatro o más apiñados en la misma celda, sostenido,
+mueren todos**. Pero el objetivo ya no es sobrevivir solo: **si la ronda aguanta
+un minuto con alguien vivo, reviven los muertos y ganan los diez**. Gana el
+último que siga vivo, gana la mesa entera si aguanta el minuto, o no gana nadie
+si la grilla se los lleva a todos. Y para compensar la tregua, la bola puede ir
+al **doble** de rápido.
 
 ![Diez jugadores con nombre de color huyendo de la bola en una mesa cuadrada](docs/screenshot.png)
 
@@ -29,6 +35,7 @@ Requiere Node 20.9 o superior (`nvm use` respeta el `.nvmrc`).
 ```bash
 npm install
 cp .env.example .env.local   # pega tu TYPESAFE_API_KEY
+docker compose up -d         # mongo :27017, express :8081 (opcional)
 npm run dev                  # http://localhost:3000
 ```
 
@@ -53,13 +60,14 @@ no sabe que existe un proveedor de modelo.**
 | Capa | Carpeta | Que hace |
 | --- | --- | --- |
 | Fisica | `src/lib/game/world.ts` | La mesa sobre planck.js: la bola y las cuatro paredes. |
-| Motor | `src/lib/game` | Reglas, jugadores, muerte y saque. TypeScript puro, testeable. |
+| Motor | `src/lib/game` | Reglas, jugadores, la grilla antiagolpamiento, muerte y saque. TypeScript puro, testeable. |
 | Trayectoria | `src/lib/game/physics.ts` | Donde estara la bola, cuando pilla a cada uno y como se resuelve un roce. |
 | Prompt | `src/lib/game/prompt.ts` | Convierte el estado en el texto en espanol + las preguntas. |
 | IA | `src/lib/ai` | Contratos (zod) y normalizacion de la respuesta. |
 | Servidor | `src/server/*`, `src/app/api/*` | Habla con TypeSafe. El navegador nunca lo hace. |
 | Cliente | `src/lib/client` | Bucle de decisiones, stores y ajustes. |
 | Instrumentacion | `src/server/trace.ts`, `src/lib/ai/pricing.ts` | Traza de peticiones y tarifas de TypeSafe. |
+| Historico | `docker-compose.yml`, `src/server/mongo.ts`, `src/lib/client/match-recorder.ts` | MongoDB: cada partida completa en la coleccion `matches`. |
 | Mesa | `src/lib/client/board` | La escena de Phaser 4: dibujo, particulas, tweens, camara y audio. |
 | UI | `src/components`, `src/hooks` | HUD, consola del modelo y estados. React solo pinta; el juego corre fuera. |
 
@@ -70,7 +78,8 @@ no sabe que existe un proveedor de modelo.**
    (más quedarse quieto) y su decisión es **una sola** por turno, no dos. Los
    diez salen de un mismo círculo alrededor del centro, así que ninguno arranca
    con ventaja. La bola es el peligro: no se pierde nunca, y un roce la mata.
-   La partida acaba cuando queda un jugador.
+   La partida acaba cuando queda un jugador, o antes si la grilla
+   antiagolpamiento (ver el punto 13) vacía la mesa.
 1. **La bola tuerce en cada rebote, y esto no es un detalle.** Con la dirección
    constante, una bola elástica recorre siempre las mismas cuatro rectas de la
    mesa: hay medio tablero donde **no puede aparecer nunca**, los jugadores se
@@ -80,10 +89,13 @@ no sabe que existe un proveedor de modelo.**
    el vuelo en marcha; el prompt lo dice y `predictThreat()` corta el horizonte
    en el próximo muro en vez de inventarse el futuro. La velocidad de la bola no
    la cambian ni los rebotes ni las muertes, y la mesa tampoco cambia de tamano;
-   lo unico que la mueve es el control "velocidad bola" del panel, que se puede
-   ajustar en vivo (90 a 420 px/s, por encima de los 300 px/s del corredor el
-   juego pasa a ser de reflejos). Ya no hay muerte subita: la ronda la decide
-   por completo el modelo y, si nadie muere, la ronda sigue.
+   arranca **al máximo** (840 px/s, `BALL_SPEED = MAX_BALL_SPEED`) y lo unico que
+   la mueve es el control "velocidad bola" del panel, que la puede bajar en vivo
+   (90 a 840 px/s; el techo es el doble de la velocidad del corredor, así que de
+   fábrica el juego es de pura tensión). No
+   hay muerte subita, pero sí un reloj: si la ronda aguanta `SURVIVAL_MS` (un
+   minuto) con alguien vivo, no gana uno — reviven los muertos y ganan todos
+   (ver el punto 14).
 2. **El roce se resuelve con un barrido, no con cuerpos de Box2D.** Los
    jugadores son círculos que viven en el motor, y el motor comprueba el
    segmento que la bola recorrió en el paso contra cada uno. Así no hay
@@ -140,6 +152,46 @@ no sabe que existe un proveedor de modelo.**
     el navegador. `useEngineUi` pinta el HTML del servidor con un snapshot
     estable y pasa al estado vivo en cuanto React hidrata; sin eso React
     descartaba la hidratacion (error #418).
+13. **La grilla antiagolpamiento.** Además de la bola hay una segunda regla de
+    muerte, y no es decorativa: la mesa se parte en una grilla de 16x16 celdas
+    de 42 px (lo justo para un cuerpo, `GRID_CELL`) y una celda que reúne a
+    **más de tres** corredores vivos y lo sostiene `CROWD_STRIKES` revisiones
+    seguidas (una cada `CROWD_CHECK_MS`) revienta y mata a todos los que están
+    dentro. La aglomeración tiene que persistir: un cruce de paso no cuenta. Es
+    el castigo a acampar en una puntica, el comportamiento que hacía que la
+    partida se resolviera escondiéndose. La regla viaja en el prompt —con la
+    celda de cada jugador, cuántos la comparten y la **posición relativa de cada
+    uno frente a los demás vivos**, dirección y distancia, del más cercano al
+    más lejano— y se dibuja tenue en la mesa;
+    la celda en peligro se enciende en rojo. Si la grilla se lleva a todos, la
+    ronda termina **sin ganador** (`UiState.draw`, cartel "LA GRILLA SE LOS
+    LLEVO") en vez de quedarse girando sin jugadores.
+14. **La meta colectiva: aguantar un minuto hace ganar a todos.** El objetivo
+    dejó de ser individual. Si la ronda llega a `SURVIVAL_MS` (60 s) con al
+    menos un jugador vivo, **reviven los muertos** —vuelven al punto donde
+    cayeron— y la ronda es de los diez: `UiState.truce`, cartel "SOBREVIVEN
+    TODOS", y el marcador suma una victoria a cada color. El reloj es de ronda
+    y no lo reinicia ninguna muerte: solo sirve la supervivencia sostenida. Es
+    el cierre opuesto a la grilla (contra apiñarse, contra morir solo) y la
+    razón de que el techo de la bola haya subido al doble: aguantar el minuto
+    con la bola a 840 px/s es la hazaña. Como las rondas reales se resolvían en
+    pocos segundos, la tregua es rara y por eso vale doble: no se gana
+    sobreviviendo, se gana sobreviviendo **juntos**.
+15. **El historico vive en Mongo, y solo guarda partidas completas.** Cada ronda
+    que **aguanta el minuto** (la tregua) se guarda entera en **una sola
+    coleccion**, `matches`: configuracion, desenlace, y encima la partida
+    completa —un muestreo de la mesa cada 200 ms (bola y diez corredores con su
+    celda), **cada decisión del modelo** con sus probabilidades, y **cada
+    evento** (rebote, saque, muerte con causa, cierre). Cada documento lleva un
+    `matchId` propio y su `at`, así que dos partidas nunca se confunden y el
+    análisis posterior se hace filtrando la colección. También guarda, turno por
+    turno, la **petición y la respuesta crudas de Jev** (`modelCalls`): el
+    `state` que vio el modelo y el JSON que contestó, enlazados por `matchId`
+    porque los arma el servidor y el navegador nunca los ve. Las rondas que terminan
+    antes (gano uno, o la grilla vació la mesa) **no se guardan**: no son
+    completas. El grabador (`src/lib/client/match-recorder.ts`) junta la
+    telemetría en el navegador y el servidor la persiste; Mongo es opcional, sin
+    `MONGO_URL` el juego no cambia.
 
 ### La mesa, archivo por archivo
 
@@ -176,6 +228,16 @@ Tres trampas que ya estan resueltas y conviene no reintroducir:
 | `/api/decision` | POST | Recibe el snapshot del juego y devuelve la jugada de cada jugador. |
 | `/api/trace` | GET, DELETE | Peticiones al modelo y resumen de la sesion (tokens y costo). `?limit=0` trae solo el resumen. |
 | `/api/trace/stream` | GET | Server-Sent Events: empuja la traza en cuanto hay una peticion nueva. |
+| `/api/matches` | POST | Guarda una partida completa (la que aguanto el minuto) en Mongo, con las peticiones y respuestas crudas de Jev. |
+| `/api/matches` | GET | Ultimas partidas (resumen). `?limit=50` (tope 500). Con `?matchId=` devuelve una partida entera. |
+| `/api/matches` | DELETE | Suelta las llamadas a Jev archivadas de una ronda que no se guardo. `?matchId=`. |
+
+`POST /api/matches` recibe el documento de una ronda completa (`matchId`,
+`config`, `result`, `samples`, `decisions`, `events`). El servidor le adjunta las
+**peticiones y respuestas crudas de Jev** que archivo por `matchId` mientras se
+jugaba. Responde `201 { stored: true, id, modelCalls }` si se guardo; `200
+{ stored: false, reason }` si la partida no era completa o Mongo no estaba
+configurado; `400` si no cumple el contrato.
 
 `POST /api/decision` recibe `{ snapshot, model? }` y responde:
 
@@ -215,6 +277,70 @@ el prompt lleva el estado de los diez y la regla de muerte.
 respuesta es un 502 con el codigo del fallo (`model-timeout`,
 `model-unauthorized`, `model-malformed`...); no hay respaldo local.
 
+## Historico de partidas (MongoDB)
+
+El `docker-compose.yml` de la raiz levanta **MongoDB 7** y **mongo-express**
+(para mirar la base desde el navegador):
+
+```bash
+docker compose up -d          # mongo :27017, express :8081
+docker compose down           # apaga y conserva los datos
+docker compose down -v        # apaga y borra el historico
+```
+
+Los puertos son variables para no chocar con otros stacks:
+`MONGO_PORT=27018 MONGO_EXPRESS_PORT=8082 docker compose up -d`. La app se
+conecta por `MONGO_URL`; sin esa variable el juego corre igual y no guarda nada.
+La persistencia es **de mejor esfuerzo**: si Mongo no esta, la ronda siguiente
+no se entera.
+
+**Solo se guardan partidas completas.** Una partida completa es la que aguanta
+el minuto entero (`SURVIVAL_MS`) con alguien vivo —la tregua colectiva—. Las que
+terminan antes (un ganador, o la grilla vaciando la mesa) y lo que se abandona a
+mitad se descartan. El filtro vive en `isCompleteMatch()` y se aplica en
+`POST /api/matches`, asi que a la coleccion nunca llega una ronda a medias.
+
+Todo cae en **una sola coleccion**, `matches`: un documento por partida. No es
+un resumen; lleva la partida entera para el analisis posterior:
+
+| Campo | Que trae |
+| --- | --- |
+| `matchId` | Identidad unica (`crypto.randomUUID`): la clave para diferenciar dos partidas. Indice unico. |
+| `at` | Fecha del servidor. Indice descendente para ordenar el historico. |
+| `round`, `model`, `outcome` | Ronda, modelo que decidia y desenlace (`truce` en toda partida guardada). |
+| `config` | `intervalMs`, `ballSpeed`, `runnerSpeed`, radios y los parametros de la grilla y de la tregua: sin esto dos partidas no son comparables. |
+| `result` | Duracion (`clockMs`), la meta del minuto (`survivalMs`), `reachedMinute`, decisiones, latencia media, rebotes, muertes (y cuantas por grilla) y los vivos al cerrar. |
+| `samples` | La mesa cada 200 ms: bola y los diez corredores con su `cell` y `cellCount`. |
+| `decisions` | Cada turno del modelo: `moves` y las `probabilities` por color. |
+| `events` | Cada rebote, saque, muerte (con `cause`) y el cierre, fechados con el reloj de ronda. |
+| `modelCalls` | **La peticion y la respuesta crudas de Jev**, una por turno: el `state` completo que recibio (con su `questions`) y el JSON exacto que devolvio, mas tokens, latencia y estado. |
+
+Las llamadas crudas no viajan en el documento del navegador: las arma el
+servidor. Cada `POST /api/decision` se etiqueta con el `matchId` de la ronda en
+curso y el servidor la archiva (`src/server/model-calls.ts`), de modo que al
+guardar la partida se adjuntan en orden. Si la ronda no llega al minuto, el
+navegador las descarta (`DELETE /api/matches?matchId=`). El listado de `GET
+/api/matches` viene sin series pesadas (ni `samples`, ni `modelCalls`): para eso
+esta `?matchId=`, que trae la partida entera.
+
+El mismo minuto que corre en la base se ve en pantalla: sobre la mesa hay un
+**reloj de tregua** (`Stage.tsx`) que cuenta atras en `M:SS` con una barra, se
+pone rojo en los ultimos 10 s, y desaparece en cuanto la ronda cierra. Su fuente
+es el mismo `clockMs` del motor que alimenta `result.clockMs` y `samples[].clockMs`,
+asi que lo que se ve y lo que se guarda son el mismo numero.
+
+El muestreo lo junta el navegador (`src/lib/client/match-recorder.ts`, una foto
+cada 200 ms —el mismo ritmo al que la grilla revisa las celdas—) y lo persiste
+`src/server/mongo.ts`. Para analizar, basta filtrar la coleccion:
+
+```js
+// Las ultimas treguas del modelo jev-latest, con su duracion y muertes por grilla
+db.matches.find(
+  { model: 'jev-latest' },
+  { matchId: 1, at: 1, 'result.clockMs': 1, 'result.crowdKills': 1, 'result.kills': 1 },
+).sort({ at: -1 }).limit(50)
+```
+
 ## Variables de entorno
 
 | Variable | Default | Descripcion |
@@ -224,6 +350,8 @@ respuesta es un 502 con el codigo del fallo (`model-timeout`,
 | `TYPESAFE_MODEL` | `jev-latest` | Modelo por defecto de TypeSafe. |
 | `TYPESAFE_TIMEOUT_MS` | `30000` | Corte por decision lenta. |
 | `TRACE_BUFFER` | `200` | Cuantas peticiones guarda en memoria la consola del modelo. |
+| `MONGO_URL` | — | MongoDB del historico. Vacia la persistencia queda apagada. |
+| `MONGO_DB` | `nimble` | Base de datos donde vive la coleccion `matches`. |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` o `silent`. |
 | `LOG_PROMPTS` | `0` | `1` vuelca el prompt y las jugadas completas (nivel debug). |
 | `NO_COLOR` | — | Cualquier valor apaga los colores de la terminal. |
@@ -248,7 +376,7 @@ anaden la consulta enviada, los modelos disponibles, los errores con su pila
 completa y el resumen de jugadas:
 
 ```text
-07:34:09.448 DEBUG [nimble:api/decision] consulta al modelo model=jev-latest alive=10 clockMs=1000 ballSpeed=210 fieldMin=38
+07:34:09.448 DEBUG [nimble:api/decision] consulta al modelo model=jev-latest alive=10 clockMs=1000 ballSpeed=840 fieldMin=38
 07:34:09.448 DEBUG [nimble:typesafe] consulta enviada model=jev-latest questions=10 stateChars=2056 timeoutMs=30000
 07:34:13.883 DEBUG [nimble:api/decision] jugadas moves=rojo:quedarse,naranja:quedarse,amarillo:izquierda,lima:arriba,verde:izquierda
 ```
@@ -280,9 +408,11 @@ en la lista, y mientras no fijes una, la consola sigue la mas reciente.
   costo por hora proyectado y latencia media.
 
 El costo sale de la tabla oficial: Jev 1.13 cobra **$0,042 por millon de tokens
-de entrada y los de salida son gratis**. Con ~3.500 tokens por decision, una
-jugada cuesta ~$0,00015 y una hora decidiendo cada 700 ms ronda los $0,75 (en
-las pruebas reales la proyeccion salio entre $0,65 y $1,05 por hora). El precio
+de entrada y los de salida son gratis**. Con el prompt actual —que además de la
+amenaza y la celda lleva la **posición relativa de cada corredor frente a los
+demás vivos**— la petición ronda los **4.800 tokens**, así que una jugada cuesta
+~$0,00020 y una hora decidiendo cada 700 ms ronda los $1,05 (en las pruebas
+reales la proyeccion salio entre $0,90 y $1,40 por hora). El precio
 vive en `src/lib/ai/pricing.ts`: si TypeSafe cambia la tarifa, se cambia ahi y
 el HUD y la consola quedan al dia solos.
 
@@ -298,9 +428,12 @@ como "sin precio".
 
 En la barra inferior, ademas del modelo y de cada cuanto decide, esta el
 control **velocidad bola**: se arrastra y el cambio se aplica en el acto, sin
-tocar la direccion que la bola llevaba. La velocidad se guarda en `localStorage`
-y la respeta cada ronda nueva. Como viaja en el snapshot, el modelo ve el cambio
-en la siguiente decision.
+tocar la direccion que la bola llevaba. **Arranca al máximo** (840 px/s, el
+doble de la velocidad del corredor) y solo se puede bajar; la velocidad se
+guarda en `localStorage` y la respeta cada ronda nueva. Como viaja en el
+snapshot, el modelo ve el cambio en la siguiente decision. El panel "en vivo"
+lleva ademas una cuenta atras **para tregua** con lo que falta para el minuto,
+y sobre la mesa esta el reloj grande.
 
 Al lado esta el boton de tema: la app **arranca en modo claro** (es la que se
 muestra en las demos) y el boton pasa a oscuro y lo recuerda. El tema cambia el
@@ -323,16 +456,24 @@ a cero las rondas ganadas y el contador de rondas.
 npm test
 ```
 
-86 pruebas sobre la fisica (rebote elastico, roce por barrido aunque la bola
+111 pruebas sobre la fisica (rebote elastico, roce por barrido aunque la bola
 vaya a 80 m/s, rebote suave contra la pared, deriva entre el vuelo real y el
 previsto), la trayectoria (reflección exacta, límites, corte en el próximo
 rebote, predicción de amenaza con bisección), el motor (muerte al primer roce,
 velocidad y tamano de mesa estables durante toda la ronda, el control de
 velocidad reescalando sin cambiar la direccion, desvio en cada pared,
 ultimo en pie,
-pausa, independencia del tamano del frame), el prompt (la regla de muerte, la
+pausa, independencia del tamano del frame), la grilla (la celda de un punto y
+el conteo por celda, tres apinados que no matan, cuatro que se sostienen y
+mueren juntos, el apinon de paso que no cuenta, y la ronda sin ganador cuando la
+celda vacia la mesa), la tregua (pasado el minuto con alguien vivo reviven los
+caidos y la mesa entera gana), el prompt (la regla de muerte, la meta colectiva, la
 amenaza de cada jugador y las nueve direcciones) y la normalizacion de las
-respuestas. El cliente de TypeSafe tiene su propio bloque: la cabecera
+respuestas. El contrato de partida y el grabador tienen su bloque: el documento
+completo con sus diez jugadores por muestra, que `isCompleteMatch` solo acepta
+la tregua, que el grabador junta muestras/decisiones/eventos y se reinicia
+cuando el reloj retrocede (ronda nueva), y que la configuracion de Mongo no
+filtra credenciales. El cliente de TypeSafe tiene el suyo: la cabecera
 `Authorization`, el catalogo de `/v1/models` y el mapeo de errores (403 a
 `model-unauthorized`, contrato roto a `model-malformed`). La traza y el precio
 se prueban aparte: la aritmetica del costo por millon de tokens, el buffer
@@ -343,17 +484,24 @@ reciba un aviso por cada peticion.
 
 - Mover el motor al servidor y sincronizar por WebSocket para partidas
   multijugador autoritativas.
-- Guardar el historico de partidas y latencias en SQLite/Postgres en vez de
-  `localStorage`, con un panel de comparacion entre modelos.
+- Panel del historico: leer la coleccion `matches` (`GET /api/matches` ya
+  devuelve las ultimas) y comparar modelos y configuraciones en pantalla. El
+  marcador de rondas y la comparativa por modelo siguen en `localStorage`.
 - Variantes de prompt por modelo (`src/lib/game/prompt.ts` es el unico lugar a
   tocar).
 - Modo espectador: varios modelos decidiendo a la vez sobre la misma mesa.
-- **Acortar las partidas.** Con TypeSafe respondiendo en ~250 ms y una decision
-  cada 700 ms, una ronda dura unos segundos. Si se busca otro ritmo, la palanca
-  es `DEFAULT_INTERVAL_MS` en `src/lib/game/constants.ts`; ya no hay reloj de
-  pared que cierre la mesa.
-- Revivir jugadores o dar una segunda oportunidad: hoy la muerte es
-  definitiva y solo se vuelve con la ronda siguiente, que arranca sola.
+- **Calibrar la tregua.** Con TypeSafe respondiendo en ~250 ms y una decision
+  cada 700 ms, las rondas se resuelven en pocos segundos y el minuto de
+  `SURVIVAL_MS` casi nunca se cumple. Si se quiere que gane la mesa mas seguido,
+  las palancas son `SURVIVAL_MS` (bajarlo) y el techo de la bola
+  (`MAX_BALL_SPEED`, subirlo hace la tregua mas dificil); el ritmo de las
+  decisiones lo mueve `DEFAULT_INTERVAL_MS`.
+- Revivir jugadores o dar una segunda oportunidad fuera de la tregua: hoy la
+  muerte es definitiva y solo se vuelve con el minuto aguantado o con la ronda
+  siguiente, que arranca sola.
+- Afinar la grilla antiagolpamiento: `GRID_COLS`, `CROWD_LIMIT`,
+  `CROWD_STRIKES` y `CROWD_CHECK_MS` en `src/lib/game/constants.ts` son las
+  palancas de cuánto y tan rápido castiga apinarse.
 
 ## Subir este repositorio a GitHub
 

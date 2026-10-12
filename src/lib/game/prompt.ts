@@ -1,4 +1,4 @@
-import { ALL_MOVES, type Move } from './moves';
+import { ALL_MOVES, compassOf, type Move } from './moves';
 import { PLAYERS, PLAYER_NAME, type QuestionId, type Player } from './players';
 import type { GameSnapshot, PlayerSnapshot } from './types';
 
@@ -49,22 +49,56 @@ const label = (player: Player): string => {
   return name.charAt(0).toUpperCase() + name.slice(1);
 };
 
+/** En que celda de la grilla esta y cuantos la comparten. */
+const cellLine = (view: PlayerSnapshot): string =>
+  `celda (${view.cell.col}, ${view.cell.row}) con ${view.cellCount} jugadores`;
+
 /** Como se ve la amenaza de un jugador, en una frase. */
 function threatLine(snapshot: GameSnapshot, player: Player): string {
   const view: PlayerSnapshot = snapshot.players[player];
   const name = label(player);
   const where = `en (${view.x}, ${view.y})`;
+  const cell = cellLine(view);
 
   if (view.threatMs === null) {
-    return `${name} ${where}, de este vuelo la bola no le pilla: aguanta hasta que rebote`;
+    return `${name} ${where}, de este vuelo la bola no le pilla: aguanta hasta que rebote; ${cell}`;
   }
   if (view.threatMs === 0) {
-    return `${name} ${where}, LA BOLA LE ESTA ENCIMA: moverse ya`;
+    return `${name} ${where}, LA BOLA LE ESTA ENCIMA: moverse ya; ${cell}`;
   }
   return (
     `${name} ${where}, la bola le pilla en ${view.threatMs} ms por (${view.threatX}, ${view.threatY}); ` +
-    `ahora esta a ${view.distance} px`
+    `ahora esta a ${view.distance} px; ${cell}`
   );
+}
+
+/**
+ * Donde estan los demas vivos respecto de un jugador, del mas cercano al mas
+ * lejano y en las ocho direcciones de la mesa. Es la posicion relativa que cada
+ * uno necesita para no apinarse: el absoluto no dice quien tiene encima.
+ */
+function relativeLine(snapshot: GameSnapshot, player: Player): string {
+  const view: PlayerSnapshot = snapshot.players[player];
+  const others = PLAYERS.filter(
+    (other) => other !== player && snapshot.players[other].alive,
+  )
+    .map((other) => {
+      const target: PlayerSnapshot = snapshot.players[other];
+      const dx = target.x - view.x;
+      const dy = target.y - view.y;
+      const distance = Math.round(Math.hypot(dx, dy));
+      return { other, distance, direction: MOVE_TEXT[compassOf(dx, dy)] };
+    })
+    .sort((a, b) => a.distance - b.distance);
+
+  if (others.length === 0) return 'no queda nadie mas vivo';
+  return others
+    .map((entry) =>
+      entry.distance === 0
+        ? `${PLAYER_NAME[entry.other]} pegado`
+        : `${PLAYER_NAME[entry.other]} a ${entry.distance} px ${entry.direction}`,
+    )
+    .join(', ');
 }
 
 /**
@@ -75,7 +109,7 @@ function threatLine(snapshot: GameSnapshot, player: Player): string {
  * ni segunda oportunidad, y gana el ultimo jugador vivo.
  */
 export function buildStatePrompt(snapshot: GameSnapshot): string {
-  const { ball, field } = snapshot;
+  const { ball, field, grid } = snapshot;
 
   const rules =
     `Mesa cuadrada con diez jugadores, cada uno con nombre de color: ${PLAYERS.join(', ')}. ` +
@@ -85,7 +119,14 @@ export function buildStatePrompt(snapshot: GameSnapshot): string {
     `La bola no acelera sola: va a la velocidad que dice el estado, y la mesa no ` +
     `cambia de tamano. ` +
     `Si la bola toca a un jugador, ese jugador MUERE en el acto, sin vidas ni segunda oportunidad. ` +
-    `Gana el ultimo jugador que siga vivo.`;
+    `Ademas la mesa esta partida en una GRILLA invisible de ${grid.cols} por ${grid.rows} celdas: ` +
+    `si mas de ${grid.limit} jugadores vivos se juntan en la misma celda y lo sostienen ` +
+    `${grid.strikes} revisiones seguidas (una cada ${grid.checkMs} ms), la celda revienta y ` +
+    `MUEREN todos los que estan dentro. Repartirse mantiene a todos con vida; apinarse en un ` +
+    `rincon los mata. ` +
+    `Ademas hay una META COLECTIVA: si la ronda llega a ${Math.round(snapshot.survivalMs / 1000)} segundos ` +
+    `con al menos un jugador vivo, reviven todos los muertos y GANAN TODOS, no uno. ` +
+    `Gana el ultimo jugador que siga vivo; si la grilla se los lleva a todos, la ronda acaba sin ganador.`;
 
   const dead = PLAYERS.filter((player) => !snapshot.players[player].alive);
   const deadLine =
@@ -101,12 +142,21 @@ export function buildStatePrompt(snapshot: GameSnapshot): string {
     .map((player) => threatLine(snapshot, player))
     .join('. ');
 
+  // Posicion relativa de cada uno frente a los demas vivos: es lo que permite
+  // repartirse sin depender de leer coordenadas absolutas.
+  const relatives = PLAYERS.filter((player) => snapshot.players[player].alive)
+    .map((player) => `${label(player)}: ${relativeLine(snapshot, player)}`)
+    .join('. ');
+
   return (
     `${rules} ${deadLine} ${measures} ` +
     `Bola en (${ball.x}, ${ball.y}) a ${ball.speed} px/s, yendo hacia ${ball.direction}. ` +
     `${situations}. ` +
+    `Posiciones relativas, cada uno respecto de los demas vivos (del mas cercano al mas lejano): ${relatives}. ` +
     'Elige donde poner los pies para el vuelo que se ve, no para el siguiente. ' +
     'Huye de la linea de la bola y no te metas en una esquina: el punto mas peligroso de la mesa es la esquina. ' +
+    'Y no te apines con los demas: cuatro en la misma celda, sostenido, matan a los cuatro. ' +
+    'Aguantar en grupo hasta el minuto vale mas que quedarse solo: la tregua los salva a todos. ' +
     'Un solo paso por decision, asi que no llegas lejos.'
   );
 }

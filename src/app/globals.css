@@ -671,6 +671,62 @@ kbd {
   text-transform: uppercase;
 }
 
+/* Reloj del minuto: cuenta atras hacia la tregua colectiva. */
+.stage-timer {
+  position: absolute;
+  top: var(--sp-3);
+  right: var(--sp-3);
+  display: grid;
+  gap: 4px;
+  justify-items: end;
+  padding: 6px var(--sp-3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-md);
+  background: var(--badge-bg);
+  pointer-events: none;
+}
+
+.stage-timer-k {
+  font-size: var(--fs-xs);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+
+.stage-timer-v {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xl);
+  font-weight: 700;
+  line-height: 1;
+  color: var(--cyan);
+  font-variant-numeric: tabular-nums;
+}
+
+.stage-timer[data-urgent='true'] .stage-timer-v {
+  color: var(--red);
+}
+
+.stage-timer-bar {
+  display: block;
+  width: 100%;
+  min-width: 76px;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--track);
+  overflow: hidden;
+}
+
+.stage-timer-bar i {
+  display: block;
+  height: 100%;
+  background: var(--cyan);
+  transition: width 240ms linear;
+}
+
+.stage-timer[data-urgent='true'] .stage-timer-bar i {
+  background: var(--red);
+}
+
 .stage-intro {
   position: absolute;
   inset: 0;
@@ -749,6 +805,18 @@ kbd {
   letter-spacing: 0.16em;
   color: var(--team);
   text-shadow: 0 0 30px color-mix(in srgb, var(--team) 45%, transparent);
+}
+
+/* Fin sin ganador: la grilla se llevo a todos. Sin color de equipo, rojo. */
+.ovtitle-draw {
+  color: var(--red);
+  text-shadow: 0 0 30px color-mix(in srgb, var(--red) 45%, transparent);
+}
+
+/* Tregua: aguantaron el minuto y ganan todos. Verde, sin color de equipo. */
+.ovtitle-truce {
+  color: var(--green);
+  text-shadow: 0 0 30px color-mix(in srgb, var(--green) 45%, transparent);
 }
 
 .ovsub {

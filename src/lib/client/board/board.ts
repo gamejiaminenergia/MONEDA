@@ -1,6 +1,17 @@
 import type * as Phaser from 'phaser';
 
-import { BALL_R, CENTER, DANGER_R, H, PAD, RUNNER_R, W } from '@/lib/game/constants';
+import {
+  BALL_R,
+  CENTER,
+  DANGER_R,
+  GRID_CELL,
+  GRID_COLS,
+  GRID_ROWS,
+  H,
+  PAD,
+  RUNNER_R,
+  W,
+} from '@/lib/game/constants';
 import type { GameEngine } from '@/lib/game/engine';
 import { MOVE_VEC } from '@/lib/game/moves';
 import { distance } from '@/lib/game/physics';
@@ -58,9 +69,12 @@ const TONES = {
   wall: { frequency: 300, durationSec: 0.03, wave: 'square', volume: 0.02 },
   kill: { frequency: 180, durationSec: 0.2, wave: 'sawtooth', volume: 0.06 },
   death: { frequency: 90, durationSec: 0.5, wave: 'sawtooth', volume: 0.06 },
+  crowd: { frequency: 120, durationSec: 0.34, wave: 'square', volume: 0.05 },
   serve: { frequency: 520, durationSec: 0.05, wave: 'triangle', volume: 0.04 },
   over: { frequency: 660, durationSec: 0.12, wave: 'sine', volume: 0.06 },
   overEcho: { frequency: 880, durationSec: 0.18, wave: 'sine', volume: 0.06 },
+  truce: { frequency: 523, durationSec: 0.5, wave: 'sine', volume: 0.06 },
+  truceEcho: { frequency: 784, durationSec: 0.4, wave: 'sine', volume: 0.05 },
 } as const satisfies Record<string, ToneSpec>;
 
 type GameView = ReturnType<GameEngine['view']>;
@@ -78,6 +92,7 @@ export async function createBoard(options: BoardOptions): Promise<BoardHandle> {
     private runners!: PlayerRecord<Phaser.GameObjects.Container>;
     private wasAlive!: PlayerRecord<boolean>;
 
+    private gridGfx!: Phaser.GameObjects.Graphics;
     private table!: Phaser.GameObjects.Graphics;
     private dyn!: Phaser.GameObjects.Graphics;
 
@@ -115,10 +130,14 @@ export async function createBoard(options: BoardOptions): Promise<BoardHandle> {
       this.ringGfx = this.add.graphics().setDepth(1);
       this.drawSpawnRing();
 
+      // La grilla va debajo del marco y de los corredores: es referencia, no
+      // protagonista. Lo que se enciende es la celda en peligro, en `dyn`.
+      this.gridGfx = this.add.graphics().setDepth(1);
       this.table = this.add.graphics().setDepth(1);
       this.dyn = this.add.graphics().setDepth(2);
 
       const view = this.engine.view();
+      this.drawGrid();
       this.drawTable();
 
       this.runners = PLAYERS.reduce((record, player) => {
@@ -180,6 +199,7 @@ export async function createBoard(options: BoardOptions): Promise<BoardHandle> {
       this.bgGfx.fillRect(0, 0, W, H);
 
       this.drawSpawnRing();
+      this.drawGrid();
       this.drawTable();
 
       this.ball.setFillStyle(palette.ball);
@@ -322,6 +342,26 @@ export async function createBoard(options: BoardOptions): Promise<BoardHandle> {
       }
     }
 
+    /**
+     * La grilla antiagolpamiento. Fija y visible: sin ella la muerte por
+     * aglomeracion pareceria arbitraria, y el jugador tiene que poder contar
+     * cuantos corredores caen en la misma celda. La celda en peligro se
+     * enciende en `drawDynamic`, que es lo unico que cambia por frame.
+     */
+    private drawGrid(): void {
+      const gfx = this.gridGfx;
+      gfx.clear();
+      gfx.lineStyle(1, this.palette.grid, 1);
+      for (let col = 1; col < GRID_COLS; col += 1) {
+        const x = PAD + col * GRID_CELL;
+        gfx.lineBetween(x, PAD, x, H - PAD);
+      }
+      for (let row = 1; row < GRID_ROWS; row += 1) {
+        const y = PAD + row * GRID_CELL;
+        gfx.lineBetween(PAD, y, W - PAD, y);
+      }
+    }
+
     /** El marco de la mesa. Fijo: la mesa ya no se cierra. */
     private drawTable(): void {
       const gfx = this.table;
@@ -344,6 +384,23 @@ export async function createBoard(options: BoardOptions): Promise<BoardHandle> {
     private drawDynamic(view: GameView): void {
       const gfx = this.dyn;
       gfx.clear();
+
+      // Celda sobre el limite: late en rojo. Es el aviso de que cuatro
+      // corredores ahi, sostenido, los mata a los cuatro.
+      const { counts, cols, limit } = view.grid;
+      const pulse = 0.1 + 0.09 * (0.5 + 0.5 * Math.sin(this.time.now / 140));
+      for (let index = 0; index < counts.length; index += 1) {
+        if ((counts[index] ?? 0) <= limit) continue;
+        const col = index % cols;
+        const row = Math.floor(index / cols);
+        gfx.fillStyle(this.palette.crowd, pulse);
+        gfx.fillRect(
+          PAD + col * GRID_CELL + 1,
+          PAD + row * GRID_CELL + 1,
+          GRID_CELL - 2,
+          GRID_CELL - 2,
+        );
+      }
 
       for (const player of PLAYERS) {
         if (!view.alive[player]) continue;
@@ -379,12 +436,13 @@ export async function createBoard(options: BoardOptions): Promise<BoardHandle> {
     }
 
     private updateOverlays(view: GameView): void {
-      const paused = view.paused && view.winner === null;
+      const ended = view.winner !== null || view.draw || view.truce;
+      const paused = view.paused && !ended;
       this.pauseShade.setVisible(paused);
       this.pauseText.setVisible(paused);
-      this.serveText.setVisible(view.serveDelayMs > 0 && view.winner === null && !view.paused);
+      this.serveText.setVisible(view.serveDelayMs > 0 && !ended && !view.paused);
 
-      const emitting = !view.paused && view.winner === null;
+      const emitting = !view.paused && !ended;
       if (emitting !== this.trailEmitting) {
         this.trailEmitting = emitting;
         if (emitting) this.trail.start();
@@ -403,13 +461,14 @@ export async function createBoard(options: BoardOptions): Promise<BoardHandle> {
           break;
         }
         case 'kill': {
+          const crowd = event.cause === 'crowd';
           this.blast.setPosition(event.x, event.y);
-          this.blast.setParticleTint(PLAYER_COLOR[event.player]);
-          this.blast.explode(26);
+          this.blast.setParticleTint(crowd ? this.palette.crowd : PLAYER_COLOR[event.player]);
+          this.blast.explode(crowd ? 34 : 26);
           this.expandingRing(event.x, event.y, this.palette.danger);
-          this.expandingRing(event.x, event.y, PLAYER_COLOR[event.player], 40);
-          this.cameras.main.shake(420, 0.008);
-          this.play('kill');
+          this.expandingRing(event.x, event.y, crowd ? this.palette.crowd : PLAYER_COLOR[event.player], 40);
+          this.cameras.main.shake(crowd ? 520 : 420, crowd ? 0.011 : 0.008);
+          this.play(crowd ? 'crowd' : 'kill');
           break;
         }
         case 'death': {
@@ -431,6 +490,12 @@ export async function createBoard(options: BoardOptions): Promise<BoardHandle> {
           this.cameras.main.shake(240, 0.005);
           this.play('over');
           this.play('overEcho', 130);
+          break;
+        }
+        case 'truce': {
+          // Sin sacudida: la tregua no es una derrota, es un final bueno.
+          this.play('truce');
+          this.play('truceEcho', 160);
           break;
         }
         default:

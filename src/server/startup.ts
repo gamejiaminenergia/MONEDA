@@ -1,6 +1,7 @@
 import 'server-only';
 
 import { currentLogLevel, logger, logsPrompts } from './log';
+import { matchesConfigured, mongoDatabaseName, mongoTarget } from './mongo';
 import { typesafeConfig } from './typesafe';
 
 const log = logger.child('boot');
@@ -20,12 +21,16 @@ export function logStartup(): void {
   });
   log.info('configuracion', {
     typesafe: `${config.url} model=${config.model} timeoutMs=${config.timeoutMs} key=${config.apiKey ? 'ok' : 'falta'}`,
+    mongo: matchesConfigured() ? `${mongoTarget()} db=${mongoDatabaseName()} collection=matches` : 'off (sin MONGO_URL)',
     logLevel: currentLogLevel(),
     prompts: logsPrompts(),
   });
 
   if (!config.apiKey) {
     log.warn('falta TYPESAFE_API_KEY: /api/decision respondera 502 y no habra jugadas');
+  }
+  if (!matchesConfigured()) {
+    log.warn('sin MONGO_URL: las partidas no se guardan en el historico');
   }
   if (logsPrompts()) {
     log.warn('LOG_PROMPTS activo: la terminal va a volcar el estado completo de cada decision');

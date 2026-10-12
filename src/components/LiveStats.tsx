@@ -1,5 +1,6 @@
 'use client';
 
+import { SURVIVAL_MS } from '@/lib/game/constants';
 import { PLAYERS } from '@/lib/game/players';
 
 interface LiveStatsProps {
@@ -7,6 +8,7 @@ interface LiveStatsProps {
   avgLatencyMs: number | null;
   bounces: number;
   kills: number;
+  crowdKills: number;
   aliveCount: number;
   ballSpeed: number;
   clockMs: number;
@@ -18,18 +20,24 @@ export function LiveStats({
   avgLatencyMs,
   bounces,
   kills,
+  crowdKills,
   aliveCount,
   ballSpeed,
   clockMs,
 }: LiveStatsProps) {
+  const remainingSec = Math.max(0, Math.ceil((SURVIVAL_MS - clockMs) / 1000));
+
   const stats = [
     { key: 'decisiones', value: String(decisions) },
     { key: 'latencia media', value: avgLatencyMs === null ? '—' : `${avgLatencyMs} ms` },
     { key: 'rebotes', value: String(bounces) },
     { key: 'muertos', value: `${kills}/${PLAYERS.length - 1}` },
+    { key: 'por grilla', value: String(crowdKills) },
     { key: 'vivos', value: `${aliveCount}/${PLAYERS.length}` },
     { key: 'velocidad bola', value: `${ballSpeed} px/s` },
     { key: 'tiempo', value: `${(clockMs / 1000).toFixed(1)} s` },
+    // Cuenta atras de la meta colectiva: cumplida con alguien vivo, ganan todos.
+    { key: 'para tregua', value: `${remainingSec} s` },
   ];
 
   return (

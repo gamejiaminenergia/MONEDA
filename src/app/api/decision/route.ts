@@ -8,6 +8,7 @@ import { PLAYERS, PLAYER_NAME, type Player } from '@/lib/game/players';
 import type { DecisionBundle } from '@/lib/game/types';
 import { elapsedMs, logger, logsPrompts } from '@/server/log';
 import { ModelError } from '@/server/model-error';
+import { recordModelCall } from '@/server/model-calls';
 import { pushTrace } from '@/server/trace';
 import { askSystemOne, typesafeConfig, type SystemOneRequest } from '@/server/typesafe';
 
@@ -49,6 +50,7 @@ export async function POST(request: Request) {
   }
 
   const { snapshot } = parsed.data;
+  const matchId = parsed.data.matchId;
   const config = typesafeConfig();
   const requestedModel = parsed.data.model?.trim();
   const model = requestedModel && requestedModel !== 'auto' ? requestedModel : config.model;
@@ -117,6 +119,21 @@ export async function POST(request: Request) {
       outputTokens: result.usage?.output_tokens ?? null,
     };
 
+    // Archiva la llamada cruda bajo la partida, aunque la consola este apagada:
+    // es la peticion y la respuesta de Jev que viajaran al documento en Mongo.
+    if (matchId) {
+      recordModelCall(matchId, {
+        clockMs: snapshot.clockMs,
+        model,
+        request: requestBody,
+        response: result.responseBody,
+        usage,
+        latencyMs: Date.now() - startedAt,
+        status: 'ok',
+        errorCode: null,
+      });
+    }
+
     if (traced) {
       pushTrace({
         model,
@@ -174,6 +191,20 @@ export async function POST(request: Request) {
       ms: elapsedMs(startedAt),
       error: modelError,
     });
+    // El intento fallido tambien se archiva: la peticion viajo y conviene ver
+    // por que no hubo respuesta.
+    if (matchId) {
+      recordModelCall(matchId, {
+        clockMs: snapshot.clockMs,
+        model,
+        request: requestBody,
+        response: null,
+        usage: { inputTokens: null, outputTokens: null },
+        latencyMs: Date.now() - startedAt,
+        status: 'error',
+        errorCode: modelError.code,
+      });
+    }
     if (traced) {
       pushTrace({
         model,
