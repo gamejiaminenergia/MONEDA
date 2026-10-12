@@ -1,7 +1,23 @@
-# Have No Mouth, and I Must Scream IA — Diez jugadores de colores (Next.js + TypeScript)
+# Have No Mouth, and I Must Scream IA — dos juegos con IA (Next.js + FastAPI)
 
-[![CI](https://github.com/USUARIO/REPO/actions/workflows/ci.yml/badge.svg)](https://github.com/USUARIO/REPO/actions/workflows/ci.yml)
+[![CI](https://github.com/gamejiaminenergia/MONEDA/actions/workflows/ci.yml/badge.svg)](https://github.com/gamejiaminenergia/MONEDA/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+Este repositorio tiene **dos juegos** que deciden con la API System One de
+TypeSafe, y un backend en Python:
+
+- **Bolitas (Nimble Pong)** — diez corredores huyen de una bola que mata.
+  Next.js + TypeScript, con motor propio sobre planck.js y Phaser. Se abre en `/`.
+- **BOLSA** — el Mercado de Energia Mayorista (MEM) colombiano en miniatura,
+  **mensual 2020-2025**. Frontend Next.js + **backend FastAPI** (`api/`) que
+  ingiere datos reales de XM (skill `elecdb`). Se abre en `/bolsa`.
+
+La documentacion vive en `docs/bolsa/`, `docs/bolitas/` y `docs/mem/`; la guia
+para agentes es [`AGENTS.md`](AGENTS.md).
+
+---
+
+## Bolitas (Nimble Pong)
 
 Pong de diez jugadores con IA —rojo, naranja, amarillo, lima, verde, turquesa,
 cian, azul, morado y rosa— en el que cada jugada la decide la API System One de
@@ -497,21 +513,20 @@ reciba un aviso por cada peticion.
 
 ## Subir este repositorio a GitHub
 
-El repositorio ya esta inicializado en la rama `main`. Antes del primer push,
-cambia dos cosas:
-
-- el titular del copyright en [`LICENSE`](LICENSE), si el proyecto no es tuyo a
-  titulo personal;
-- `USUARIO/REPO` en el badge de arriba, por tu usuario y nombre de repositorio.
+El repositorio ya esta en la rama `main`, con `origin` apuntando a
+`https://github.com/gamejiaminenergia/MONEDA`. Para publicar cambios:
 
 ```bash
 git add -A
-git commit -m "Nimble Pong: diez jugadores de colores, la bola mata al que toca"
-git remote add origin git@github.com:USUARIO/REPO.git
-git push -u origin main
+git commit -m "tu mensaje"
+git push origin main
 ```
 
-Si prefieres HTTPS: `git remote add origin https://github.com/USUARIO/REPO.git`.
+Clonar de cero: `git clone https://github.com/gamejiaminenergia/MONEDA.git`.
+
+Los secretos **nunca** se suben: `TYPESAFE_API_KEY` vive en `.env.local`
+(bolitas) o en `api/.env` (BOLSA); el `.gitignore` cubre ambos. Si la clave se
+filtro, rotala en <https://console.typesafe.ai/keys>.
 
 ## BOLSA — el mismo motor, ahora como mercado
 

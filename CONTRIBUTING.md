@@ -1,28 +1,44 @@
 # Contribuir
 
-Gracias por mirar esto. Es un proyecto chico: con que `npm run verify` pase y
-la partida siga teniendo sentido, alcanza.
+Gracias por mirar esto. El repo tiene dos juegos (bolitas y BOLSA) y un backend
+FastAPI. Con que pasen `npm run verify`, `npm run build` y `pytest` del backend,
+y las partidas sigan teniendo sentido, alcanza.
 
 ## Levantar el proyecto
 
+Bolitas y BOLSA (frontend Next.js):
+
 ```bash
 npm install
-cp .env.example .env.local
-npm run dev
+cp .env.example .env.local   # pega TYPESAFE_API_KEY
+npm run dev                  # http://localhost:3000  (bolitas y /bolsa)
 ```
 
-El unico proveedor es TypeSafe: pon `TYPESAFE_API_KEY` en `.env.local` y listo.
-Sin clave el servidor levanta, pero no hay jugadas: no queda respaldo local.
+Backend del MEM (BOLSA, FastAPI):
+
+```bash
+cd api
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+cp .env.example .env         # TYPESAFE_API_KEY, MONGO_URL, ELECDB_URL
+.venv/bin/uvicorn app.main:app --reload --port 8000
+```
+
+El unico proveedor es TypeSafe: pon `TYPESAFE_API_KEY` en `.env.local` (frontend)
+o en `api/.env` (backend) y listo. Sin clave no hay jugadas: no queda respaldo
+local.
 
 ## Antes de mandar un PR
 
 ```bash
-npm run verify   # tipos + lint + tests
+npm run verify   # tipos + lint + tests (bolitas y BOLSA)
 npm run build
+cd api && .venv/bin/pytest -q   # backend FastAPI
 ```
 
-Si el cambio toca fisica, prediccion o reglas, agrega un test en `tests/`. Los
-tests corren en Node, sin navegador ni red.
+Si el cambio toca fisica, prediccion, reglas o el mercado, agrega un test en
+`tests/` (TS) o en `api/tests/` (Python). Los tests corren sin navegador, sin red
+y sin base de datos.
 
 ## Como esta armado
 
@@ -44,6 +60,20 @@ no sabe que existe TypeSafe.**
 - `src/lib/client/board/` — la escena de Phaser 4: dibujo, particulas, camara y
   audio. Avanza el motor y sincroniza la mesa con `engine.view()`.
 - `src/lib/client/` + `src/components/` — bucle de decisiones, stores y React.
+
+## BOLSA y el backend del MEM
+
+BOLSA reusa el esqueleto (motor puro, decisiones de IA, historia en Mongo) y le
+suma la interaccion por precio. Es **mensual 2020-2025** y tiene dos backends:
+
+- `src/lib/bolsa/` + `src/server/bolsa/` + `src/app/api/bolsa/` — backend en
+  TypeScript, con MVC y SOLID (controlador, servicio, puertos y adaptadores).
+- `api/` — backend **FastAPI** (Python) de ida: ingiere el MEM real (`elecdb`) y
+  juega el mercado. Puertos + adaptadores; punto de composicion en
+  `api/app/container.py`.
+
+El frontend de BOLSA vive en `src/lib/client/bolsa/`, `src/hooks/useBolsa.ts` y
+`src/components/bolsa/`. Los planes e informes, en `docs/bolsa/`.
 
 ## Estilo
 
